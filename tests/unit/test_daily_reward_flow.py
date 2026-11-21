@@ -7,9 +7,36 @@ import pytest
 
 from plans.aura_base.src.services.interaction_service import InteractionService
 from plans.aura_base.src.services.observation_service import Frame, Observation
+from plans.aura_base.src.services.vision_service import VisionService
 from plans.resonance_pc.src.actions import _daily_reward_flow
-from plans.resonance_pc.src.actions._daily_reward_vision import RewardPage
+from plans.resonance_pc.src.actions._daily_reward_vision import DailyRewardError, DailyRewardReader, RewardPage
 from tests.interaction_clock import install_clock
+
+
+@pytest.mark.parametrize("reason", ["nonfinite_confidence", "invalid_match_center"])
+def test_reward_exit_unknown_does_not_confirm_the_underlying_daily_page(reason):
+    frame = Frame.from_image(np.zeros((720, 1280, 3), dtype=np.uint8))
+    observation = SimpleNamespace(capture=lambda **_: frame, vision=VisionService())
+    reader = DailyRewardReader(observation)
+
+    def match_template(_frame, template, **_kwargs):
+        if template is reader.templates["reward_exit"]:
+            confidence = float("nan") if reason == "nonfinite_confidence" else 0.95
+            return Observation("unknown", frame.id, SimpleNamespace(confidence=confidence), reason=reason)
+        assert template is reader.templates["reward_title"]
+        return Observation("absent", frame.id)
+
+    observation.match_template = match_template
+    if reason == "nonfinite_confidence":
+        page = reader.observe(None)
+        assert page.page_state == "unknown"
+        assert not page.absent("reward_exit")
+        assert page.summary()["matches"]["reward_exit"]["confidence"] is None
+    else:
+        with pytest.raises(DailyRewardError) as error:
+            reader.observe(None)
+        assert error.value.code == "daily_reward_recognition_failed"
+        assert error.value.detail["reason"] == reason
 
 
 @pytest.mark.parametrize(

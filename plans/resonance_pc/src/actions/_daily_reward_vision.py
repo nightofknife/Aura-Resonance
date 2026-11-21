@@ -43,7 +43,8 @@ class RewardPage:
     def summary(self):
         return {"page_state": self.page_state, "frame_id": self.frame.id,
                 "matches": {key: {"state": hit.state,
-                    "confidence": float(getattr(hit.value, "confidence", 0.)),
+                    "confidence": (None if hit.reason == "nonfinite_confidence"
+                                   else float(getattr(hit.value, "confidence", 0.))),
                     "center": list(hit.client_center) if hit.state == "present" else None,
                     "reason": hit.reason} for key, hit in self.hits.items()}}
 
@@ -121,23 +122,27 @@ class DailyRewardReader:
                     roi=tuple(profile["roi"]), threshold=profile["threshold"],
                     use_grayscale=profile["use_grayscale"], preprocess=profile["preprocess"],
                     match_method=getattr(cv2, method) if isinstance(method, str) else method)
-                if hits[key].state == "unknown":
+                # A low-contrast transition frame can make a normalized match
+                # undefined. Let the existing page poll retry with a fresh frame.
+                if hits[key].state == "unknown" and hits[key].reason != "nonfinite_confidence":
                     raise DailyRewardError("daily_reward_recognition_failed", "每日奖励识别发生技术错误，已停止。",
                         {"control": key, "reason": hits[key].reason})
-            return hits[key].state == "present"
+            return hits[key].state
 
         # Never infer task state through an upper reward overlay. A lone reward
-        # anchor is ambiguous and cannot authorize either input or absence.
+        # anchor or an undefined match cannot confirm that the overlay is absent.
         title, exit_hint = match("reward_title"), match("reward_exit")
-        if title and exit_hint:
+        if title == exit_hint == "present":
             return RewardPage(frame, "reward", hits)
-        if title or exit_hint:
+        if title != "absent" or exit_hint != "absent":
             return RewardPage(frame, "unknown", hits)
-        if match("daily_tab"):
-            for key in ("claimable", "activity_gold", "activity_blue", "city_main"):
-                match(key)
-            return RewardPage(frame, "daily", hits)
-        if match("main_screen"):
-            match("main_entry_with_red")
-            return RewardPage(frame, "main", hits)
+
+        daily_tab = match("daily_tab")
+        if daily_tab == "present":
+            controls = ("claimable", "activity_gold", "activity_blue", "city_main")
+            if all(match(key) != "unknown" for key in controls):
+                return RewardPage(frame, "daily", hits)
+        elif daily_tab == "absent" and match("main_screen") == "present":
+            if match("main_entry_with_red") != "unknown":
+                return RewardPage(frame, "main", hits)
         return RewardPage(frame, "unknown", hits)
