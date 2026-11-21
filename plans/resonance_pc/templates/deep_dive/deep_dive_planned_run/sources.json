@@ -173,8 +173,10 @@
       "font_path_id": -4548631661189831125,
       "font_sha256": "78101f93fb76951da79728a7ece95a974fb8f95f2024fa50792bc79627951a07",
       "native_font_size": 40,
+      "screen_font_size": 26,
+      "rasterization": "Truncate native font size times canvas scale as Unity TextGenerator does. Render at 4x the integer screen font size and downsample by 4 with LANCZOS.",
       "size": [
-        168,
+        164,
         36
       ]
     },
@@ -209,9 +211,11 @@
       "font_path_id": 6136794397608061395,
       "font_sha256": "f748b45d0253b2a9b80315a287daca65874f297122683c9e9eaf2ca16cbc283f",
       "native_font_size": 28,
+      "screen_font_size": 18,
+      "rasterization": "Truncate native font size times canvas scale as Unity TextGenerator does. Render at 4x the integer screen font size and downsample by 4 with LANCZOS.",
       "source_component": "CubeRogueMain/Group_MoveTips/Group_BossMove/Txt_",
       "size": [
-        139,
+        134,
         26
       ]
     },
@@ -282,7 +286,7 @@
   "notes": [
     "Native sprites resized at 2/3 canvas scale.",
     "Text templates use embedded client fonts and supersampling; Unity rasterization can differ.",
-    "Generated from local resources; no game interaction or screenshot validation was performed.",
+    "Generated from local resources. The Boss card title was verified against a 1280x720 capture.",
     "Settlement titles are centrally cropped to exclude repeated decorative horizontal bars."
   ],
   "prefab_nodes": {

@@ -88,6 +88,48 @@ def test_native_move_requires_the_actual_selected_destination(selected_col, expe
     assert step['status'] == expected
 
 
+@pytest.mark.parametrize('title_confirmed', [True, False])
+def test_native_boss_move_rechecks_the_title_on_the_fresh_card(monkeypatch, title_confirmed):
+    action = dict(action_id='move', target_occupant='singularity', phase='move_selection_wait',
+                  before_hud={'rotations_used': 1})
+    state = dict(layout={'coordinate_frame': 'native_board'}, pending_action=action, event_stack=[])
+    earlier_card = dict(scene='event_entry', event_type='boss_battle', click=[1086, 542])
+    fresh_frame = object()
+    fresh_card = dict(valid=True, scene='ambiguous_event_entry', scores={'event_enter': 1.0},
+                      entry_card={'enter_point': [1086, 542]})
+    ocr = object()
+    submitted = []
+
+    async def capture(_app, _family):
+        return fresh_frame, fresh_card
+
+    async def read_hud(_app, frame, reader, observation):
+        assert frame is fresh_frame and reader is ocr and observation is fresh_card
+        return {'boss_entry_title_confirmed': title_confirmed}
+
+    async def execute(_app, command, **parameters):
+        submitted.append((command, parameters))
+        return 'submitted'
+
+    monkeypatch.setattr(flow, '_capture', capture)
+    monkeypatch.setattr(flow, '_read_runtime_hud', read_hud)
+    monkeypatch.setattr(flow, '_execute_native_action', execute)
+    monkeypatch.setattr(flow, '_native_action_parameters', lambda *_: {'face': 3, 'row': 2, 'col': 3})
+    monkeypatch.setattr(flow, '_log', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flow, '_RUN_OCR', SimpleNamespace(get=lambda: ocr))
+
+    asyncio.run(flow._begin_node(state, None, object(), earlier_card, action))
+
+    if title_confirmed:
+        assert submitted == [('confirm_move', {'face': 3, 'row': 2, 'col': 3})]
+        assert action['phase'] == 'node_entered'
+        assert state['event_stack'][0]['owner'] == 'player_move_encounter'
+    else:
+        assert not submitted
+        assert action['phase'] == 'move_selection_wait'
+        assert not state['event_stack']
+
+
 @pytest.mark.parametrize('player,boss,inspirations,rounds,rotations,expected_yield', [
     (21, 23, (18, 20), 3, 1, 0),  # Taking the nearby inspiration reduces the deadline probability.
     (4, 0, (1,), 1, 0, 1),  # Both moves next to the boss meet on time, and one picks up inspiration.
