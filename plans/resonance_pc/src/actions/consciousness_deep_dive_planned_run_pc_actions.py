@@ -920,8 +920,15 @@ async def _begin_node(state, app, image, observation, action):
     # The recognized card establishes which event flow owns the next scene.
     if state['layout'].get('coordinate_frame') == 'native_board':
         fresh, observed = await _capture(app, _family(state))
-        if (_terminal(state, fresh, observed) or not observed.get('valid')
-                or observed.get('scene') != 'event_entry' or observed.get('event_type') != kind):
+        if _terminal(state, fresh, observed) or not observed.get('valid'):
+            return
+        if (boss_target and observed.get('event_type') != kind
+                and observed.get('scene') in {'event_entry', 'ambiguous_event_entry'}):
+            # The polling path can establish this title from OCR. Read the
+            # fresh card too before authorizing the native confirmation.
+            raw_hud = await _read_runtime_hud(app, fresh, _RUN_OCR.get(), observed)
+            observed = enrich_observation(observed, raw_hud)
+        if observed.get('scene') != 'event_entry' or observed.get('event_type') != kind:
             return
         status = await _execute_native_action(app, 'confirm_move', **_native_action_parameters(state, action))
         if status == 'waiting':
