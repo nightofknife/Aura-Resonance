@@ -46,6 +46,10 @@ class CaptureResult:
     backend: str | None = None
     quality_flags: list[str] = field(default_factory=list)
     error_message: str = field(default="", repr=False)
+    frame_id: str | None = None
+    frame_generation: int | None = None
+    captured_at_monotonic: float | None = None
+    stale: bool = False
 
     @property
     def image_size(self) -> Tuple[int, int] | None:

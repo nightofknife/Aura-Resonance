@@ -82,6 +82,7 @@ class Frame:
     color_space: Literal["RGB", "BGR", "GRAY"]
     roi: Rect
     target_identity: Any = None
+    stale: bool = False
 
     def __post_init__(self):
         image = self.image
@@ -107,12 +108,12 @@ class Frame:
     @classmethod
     def from_image(cls, image: np.ndarray, *, color_space: str = "RGB", roi: Rect | None = None,
                    target_identity: Any = None, timestamp: float | None = None,
-                   frame_id: str | None = None) -> Frame:
+                   frame_id: str | None = None, stale: bool = False) -> Frame:
         if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
             raise ValueError("Frame requires an image ndarray with two or three dimensions")
         return cls(frame_id or uuid4().hex, time.monotonic() if timestamp is None else timestamp,
                    image, color_space, roi if roi is not None else (0, 0, image.shape[1], image.shape[0]),
-                   target_identity)
+                   target_identity, stale)
 
     def crop(self, roi: Rect | None) -> Frame:
         """Crop an absolute client ROI; the stored origin is applied once."""
@@ -126,7 +127,8 @@ class Frame:
             return self
         return Frame.from_image(self.image[y-oy:y-oy+height, x-ox:x-ox+width],
                                 color_space=self.color_space, roi=(x, y, width, height),
-                                target_identity=self.target_identity, timestamp=self.timestamp, frame_id=self.id)
+                                target_identity=self.target_identity, timestamp=self.timestamp, frame_id=self.id,
+                                stale=self.stale)
 
     def rgb_image(self) -> np.ndarray:
         if self.color_space != "BGR":
@@ -222,7 +224,8 @@ class ObservationService:
         runtime = getattr(self.app, "target_runtime", None)
         return read_target_identity(runtime)
 
-    def capture(self, *, scope: OperationScope | None = None, roi: Rect | None = None) -> Frame:
+    def capture(self, *, scope: OperationScope | None = None, roi: Rect | None = None,
+                allow_stale: bool = False) -> Frame:
         scope = self._scope(scope)
         with scope.activate():
             scope.checkpoint()
@@ -232,7 +235,8 @@ class ObservationService:
                 roi = _rect(roi)
             try:
                 before = self._identity()
-                result = self.app.capture(rect=roi)
+                capture = getattr(self.app, "capture_latest", None) if allow_stale else None
+                result = (capture if callable(capture) else self.app.capture)(rect=roi)
                 scope.checkpoint()
                 after = self._identity()
                 scope.checkpoint()
@@ -240,12 +244,17 @@ class ObservationService:
                     raise CaptureError("Capture target identity changed", roi=roi)
                 if not result.success or result.image is None:
                     raise CaptureError(getattr(result, "error_message", "") or "capture_failed", roi=roi)
+                stale = bool(getattr(result, "stale", False))
+                if stale and not allow_stale:
+                    raise CaptureError("waiting_for_fresh_frame", reason="waiting_for_fresh_frame", roi=roi)
                 actual_roi = getattr(result, "relative_rect", None) or roi
                 if (actual_roi is not None and isinstance(result.image, np.ndarray)
                         and result.image.shape[:2] != (actual_roi[3], actual_roi[2])):
                     raise CaptureError("Capture image dimensions do not match the ROI",
                                        reason="capture_size_invalid", roi=roi)
-                frame = Frame.from_image(result.image, color_space="RGB", roi=actual_roi, target_identity=after)
+                frame = Frame.from_image(result.image, color_space="RGB", roi=actual_roi, target_identity=after,
+                                         frame_id=getattr(result, "frame_id", None), stale=stale,
+                                         timestamp=getattr(result, "captured_at_monotonic", None))
                 scope.checkpoint()
                 return frame
             except OperationTimeout:
@@ -257,12 +266,12 @@ class ObservationService:
                 scope.checkpoint()
                 raise CaptureError(str(exc), roi=roi) from exc
 
-    def capture_regions(self, regions: Sequence[Rect], *, scope: OperationScope | None = None) -> Frame:
+    def capture_regions(self, regions: Sequence[Rect], *, scope: OperationScope | None = None,
+                        allow_stale: bool = False) -> Frame:
         """Capture the enclosing rectangle of nonempty absolute client ROIs once.
 
         The caller owns this observation round and passes the returned Frame to
-        crop/matching readers. Every call captures anew; no frame is retained
-        across polling rounds or input, and no probes are evaluated here.
+        crop/matching readers. An opted-in cached frame retains its identity.
         """
         scope = self._scope(scope)
         with scope.activate():
@@ -275,7 +284,7 @@ class ObservationService:
             right = max(region[0] + region[2] for region in regions)
             bottom = max(region[1] + region[3] for region in regions)
             roi = (left, top, right - left, bottom - top)
-            frame = self.capture(scope=scope, roi=roi)
+            frame = self.capture(scope=scope, roi=roi, allow_stale=allow_stale)
             if frame.roi[2:] != roi[2:]:
                 raise CaptureError("Capture image dimensions do not match the requested regions",
                                    reason="capture_size_invalid", roi=roi)
@@ -285,16 +294,18 @@ class ObservationService:
             scope.checkpoint()
             return frame
 
-    async def capture_regions_async(self, regions: Sequence[Rect], *, scope: OperationScope | None = None) -> Frame:
+    async def capture_regions_async(self, regions: Sequence[Rect], *, scope: OperationScope | None = None,
+                                    allow_stale: bool = False) -> Frame:
         scope = self._scope(scope)
-        return await scope.run_async(self.capture_regions, regions, scope=scope)
+        return await scope.run_async(self.capture_regions, regions, scope=scope, allow_stale=allow_stale)
 
-    async def capture_async(self, *, scope: OperationScope | None = None, roi: Rect | None = None) -> Frame:
+    async def capture_async(self, *, scope: OperationScope | None = None, roi: Rect | None = None,
+                            allow_stale: bool = False) -> Frame:
         scope = self._scope(scope)
-        return await scope.run_async(self.capture, scope=scope, roi=roi)
+        return await scope.run_async(self.capture, scope=scope, roi=roi, allow_stale=allow_stale)
 
     def observe(self, probes, *, scope: OperationScope | None = None, roi: Rect | None = None,
-                frame: Frame | None = None):
+                frame: Frame | None = None, allow_stale: bool = False):
         """Evaluate callable probes on one frame, isolating each probe failure.
 
         A callable returns one Observation; mappings and sequences retain their
@@ -309,7 +320,8 @@ class ObservationService:
         with scope.activate():
             scope.checkpoint()
             try:
-                current = frame.crop(roi) if frame is not None else self.capture(scope=scope, roi=roi)
+                current = (frame.crop(roi) if frame is not None
+                           else self.capture(scope=scope, roi=roi, allow_stale=allow_stale))
             except CaptureError as exc:
                 scope.checkpoint()
                 values = [(key, Observation("unknown", reason=str(exc))) for key, _ in items]
@@ -317,6 +329,9 @@ class ObservationService:
                 values = []
                 for key, probe in items:
                     scope.checkpoint()
+                    if current.stale:
+                        values.append((key, Observation("unknown", current.id, reason="waiting_for_fresh_frame")))
+                        continue
                     try:
                         result = probe(current)
                         if not isinstance(result, Observation):
@@ -334,12 +349,14 @@ class ObservationService:
             return values[0][1] if single else dict(values) if mapping else tuple(value for _, value in values)
 
     async def observe_async(self, probes, *, scope: OperationScope | None = None, roi: Rect | None = None,
-                            frame: Frame | None = None):
+                            frame: Frame | None = None, allow_stale: bool = False):
         scope = self._scope(scope)
-        return await scope.run_async(self.observe, probes, scope=scope, roi=roi, frame=frame)
+        return await scope.run_async(self.observe, probes, scope=scope, roi=roi, frame=frame, allow_stale=allow_stale)
 
     def _recognize(self, frame: Frame, scope: OperationScope, call: Callable, key: Any) -> Observation:
         scope.checkpoint()
+        if frame.stale:
+            return Observation("unknown", frame.id, semantic_key=key, reason="waiting_for_fresh_frame")
         try:
             result = call()
             scope.checkpoint()
@@ -435,6 +452,9 @@ class ObservationService:
             scope.checkpoint()
             current = frame.crop(roi)
             keys = [str(item) if isinstance(item, (str, Path)) else id(item) for item in templates]
+            if current.stale:
+                return tuple(Observation("unknown", current.id, semantic_key=key, reason="waiting_for_fresh_frame")
+                             for key in keys)
             observations = [None] * len(templates)
             valid_indices = []
             for index, template in enumerate(templates):

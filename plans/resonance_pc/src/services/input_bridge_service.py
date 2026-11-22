@@ -444,7 +444,8 @@ class ResonancePcInputBridgeService:
             self._ready()
             if self._frame_stream is None:
                 stale_ms = resolve_runtime_config(self.config).capture.max_stale_ms
-                stream = BridgeFrameStream(self._client.session, max_stale_ms=stale_ms)
+                stream = BridgeFrameStream(self._client.session, max_stale_ms=stale_ms,
+                                           target_key=self._frame_target_key())
                 try:
                     self._client.request("stream_start", {"frame_diagnostics": True},
                                          viewport=self._viewport, timeout=2)
@@ -454,6 +455,40 @@ class ResonancePcInputBridgeService:
                 self._frame_stream = stream
                 log_event("capture.bridge_started", stream_id=stream.session_id)
             return self._frame_stream
+
+    def _frame_target_key(self):
+        viewport = tuple(self._viewport.get(key) for key in ("width", "height", "generation"))
+        size = None
+        if self._identity is not None:
+            _, hwnd = self._bridge_target()
+            if not win32gui.IsIconic(hwnd):
+                left, top, right, bottom = win32gui.GetClientRect(hwnd)
+                size = (right - left, bottom - top)
+        return self._identity, viewport, size
+
+    def validate_frame_cache(self, stream):
+        if not self._lock.acquire(blocking=False):
+            stream.invalidate_cache()
+            raise TargetRuntimeError("capture_stream_replaced", "Bridge frame session is changing")
+        try:
+            if stream is not self._frame_stream:
+                raise TargetRuntimeError("capture_stream_replaced", "Bridge frame session changed")
+            if stream.target_key is None:
+                return
+            identity, viewport, size = self._frame_target_key()
+            expected_identity, expected_viewport, expected_size = stream.target_key
+            if (identity != expected_identity or viewport != expected_viewport
+                    or (size is not None and expected_size is not None and size != expected_size)
+                    or (self._client is not None and self._needs_hello)):
+                raise TargetRuntimeError("viewport_changed", "Bridge target window or viewport changed")
+        except TargetRuntimeError:
+            stream.invalidate_cache()
+            raise
+        except Exception as exc:
+            stream.invalidate_cache()
+            raise TargetRuntimeError("viewport_changed", "Bridge target geometry is unavailable") from exc
+        finally:
+            self._lock.release()
 
     def active_frame_stream(self, root_cid):
         stream = self._frame_stream

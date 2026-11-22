@@ -10,6 +10,10 @@ class ResonancePcAppService(AppProviderService):
     def __init__(self, screen, controller):
         super().__init__(screen, controller, screen.target_runtime)
 
+    def capture_latest(self, rect=None):
+        """Opt in to a tagged last frame for display or polling."""
+        return self.target_runtime.capture(rect=rect, allow_stale=True)
+
     def get_window_size(self):
         if self.controller.bridge.enabled:
             return self.target_runtime.get_client_rect()[2:]

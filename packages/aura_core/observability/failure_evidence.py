@@ -172,6 +172,11 @@ async def capture_failure(value: Any, *, origin: str = "framework_fallback",
                     png = payload.pop("png")
                     ref.update(save_evidence_png(png, evidence_id=ref["evidence_id"]),
                                **{key: payload.get(key) for key in ("width", "height", "backend")})
+                    for key in ("stale", "frame_generation", "frame_age_ms"):
+                        if key in payload:
+                            ref[key] = payload[key]
+                    if ref.get("stale"):
+                        ref["scene_may_have_changed"] = True
         except asyncio.CancelledError:
             ref.update(status="cancelled", reason="capture_wait_cancelled")
             attach_evidence(value, [ref])

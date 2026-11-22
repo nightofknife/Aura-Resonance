@@ -12,7 +12,7 @@ from packages.aura_core.observability import runtime_trace
 from packages.aura_core.scheduler import cancellation, operation_scope
 from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, TargetOperationBusy
 from plans.aura_base.src.services.observation_service import (
-    Frame, Observation, ObservationService,
+    CaptureError, Frame, Observation, ObservationService,
 )
 from plans.aura_base.src.services.ocr_service import MultiOcrResult, OcrResult
 from plans.aura_base.src.services.vision_service import MatchResult
@@ -98,6 +98,35 @@ def isolate(monkeypatch):
 def setup():
     app, vision, ocr = App(), Vision(), Ocr()
     return ObservationService(app, vision, ocr), app, vision, ocr
+
+
+def test_opted_in_stale_frame_preserves_identity_and_cannot_confirm_page(setup):
+    service, app, vision, ocr = setup
+    app.capture_latest = lambda rect=None: SimpleNamespace(
+        success=True, image=app.image.copy(), relative_rect=rect, frame_id="bridge:4",
+        captured_at_monotonic=20., stale=True,
+    )
+    # A legacy caller that receives a stale result through an adapter fails closed.
+    app.capture = app.capture_latest
+    with pytest.raises(CaptureError, match="waiting_for_fresh_frame"):
+        service.capture()
+
+    first = service.capture(allow_stale=True)
+    second = asyncio.run(service.capture_async(allow_stale=True))
+    crop = first.crop((0, 0, 3, 3))
+    assert first.id == second.id == crop.id == "bridge:4"
+    assert first.timestamp == second.timestamp == crop.timestamp == 20.
+    assert first.stale and second.stale and crop.stale
+
+    ocr.before_result = lambda: pytest.fail("must not OCR an old frame for a new decision")
+    probe = lambda _: pytest.fail("must not run custom probes on stale frames")
+    results = [service.observe(probe, frame=crop), service.observe(probe, allow_stale=True),
+               asyncio.run(service.observe_async(probe, allow_stale=True)),
+               service.match_template(crop, app.image[:2, :2]),
+               *service.match_templates(crop, [app.image[:2, :2]]), service.find_text(crop, "confirm")]
+    assert all(result.state == "unknown" and result.frame_id == "bridge:4"
+               and result.reason == "waiting_for_fresh_frame" and result.client_center is None for result in results)
+    assert not vision.sources
 
 
 @pytest.mark.parametrize("failure", ["reported", "missing", "empty"])
