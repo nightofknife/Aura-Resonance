@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import copy
 import hashlib
+import http.client
 import json
 import re
 import ssl
@@ -20,31 +21,22 @@ from typing import Any, Dict, List, Optional
 
 from packages.aura_core.api import service_info
 from packages.aura_core.observability.logging.core_logger import logger
-from packages.resonance_shared.market_proxy import normalize_market_proxy
+from packages.resonance_shared.market_mirror import (
+    MARKET_UPSTREAM,
+    MAX_MARKET_BYTES,
+    LocalMarketProxyHandler,
+    MarketMirrorError,
+    RejectRedirects,
+    fetch_market_mirror,
+    mirror_config_path,
+)
+from packages.resonance_shared.market_proxy import normalize_market_proxy, validate_market_source
 
 from ._buy_lot_normalization import normalize_city_product_buy_lot
 from .market_winhttp import get_market_url
 
 
 _MARKET_USER_AGENT = "Aura-ResonancePc/1.0 (+https://www.resonance-columba.com)"
-
-
-class _LocalMarketProxyHandler(urllib.request.ProxyHandler):
-    def __init__(self, port: int):
-        proxy = f"127.0.0.1:{port}"
-        super().__init__({"http": proxy, "https": proxy})
-
-    def proxy_open(self, request, proxy, scheme):
-        # Explicit selection takes precedence over the automatic proxy bypass list.
-        request.set_proxy(proxy, "http")
-        return None
-
-
-class _MarketRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):
-            raise urllib.error.HTTPError(req.full_url, code, "Unsupported market redirect", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class ResonancePcMarketDataError(RuntimeError):
@@ -71,10 +63,12 @@ class ResonancePcMarketDataError(RuntimeError):
     description="Fetches and normalizes ResonancePc market snapshots with local cache.",
 )
 class ResonancePcMarketDataService:
-    API_URL = "https://www.resonance-columba.com/api/get-prices"
+    API_URL = MARKET_UPSTREAM
     ROUTE_PAGE_URL = "https://www.resonance-columba.com/route"
     ROUTE_HOST = "https://www.resonance-columba.com"
     DEFAULT_TIMEOUT_SECONDS = 20
+    AUTOMATIC_UPSTREAM_SECONDS = 8
+    MIRROR_TIMEOUT_SECONDS = 4
     DEFAULT_DEDUPE_WINDOW_SECONDS = 300
     TRAVEL_FATIGUE_SCHEMA_VERSION = "1.0.0"
     BUY_LOT_SCHEMA_VERSION = "1.0.0"
@@ -141,28 +135,28 @@ class ResonancePcMarketDataService:
         self,
         force: bool = False,
         *,
+        market_source_mode: str = "automatic",
         market_proxy_mode: str = "automatic",
         market_proxy_port: int | None = None,
     ) -> Dict[str, Any]:
-        normalize_market_proxy(market_proxy_mode, market_proxy_port)
+        validate_market_source(market_source_mode)
+        proxy = normalize_market_proxy(market_proxy_mode, market_proxy_port)
+        proxy_port = proxy["market_proxy_port"] if market_proxy_mode == "manual" else None
         started = time.monotonic()
         logger.info(
-            "[MarketRefresh] start force=%s api_url=%s timeout_seconds=%s "
+            "[MarketRefresh] start force=%s mode=%s proxy_mode=%s "
             "cache_latest_exists=%s cache_latest=%s",
             bool(force),
-            self.api_url,
-            self.timeout_seconds,
+            market_source_mode,
+            market_proxy_mode,
             self.latest_file.is_file(),
             self.latest_file,
         )
         try:
-            raw = (
-                self.fetch_raw(proxy_port=market_proxy_port)
-                if market_proxy_mode == "manual"
-                else self.fetch_raw()
-            )
+            raw, mirror_time, source = self._fetch_remote_prices(market_source_mode, proxy_port)
             logger.info(
-                "[MarketRefresh] remote_payload_ready product_count=%s elapsed_ms=%s",
+                "[MarketRefresh] remote_payload_ready source=%s product_count=%s elapsed_ms=%s",
+                source,
                 len(raw.get("data") or {}) if isinstance(raw.get("data"), dict) else 0,
                 round((time.monotonic() - started) * 1000, 1),
             )
@@ -170,9 +164,11 @@ class ResonancePcMarketDataService:
             # must not scrape the route page and its JavaScript chunks.
             buy_lot_payload = self.load_buy_lot_payload()
             normalized = self.normalize(raw, buy_lot_payload=buy_lot_payload)
+            if mirror_time is not None:
+                normalized.update(source="market_mirror", fetched_at=mirror_time, market_source="mirror")
             persisted = self.persist(normalized, force=bool(force))
             result = copy.deepcopy(persisted)
-            result["stale"] = False
+            result.update(stale=False, market_source=source)
             logger.info(
                 "[MarketRefresh] success snapshot_id=%s fetched_at=%s city_count=%s "
                 "product_count=%s elapsed_ms=%s",
@@ -206,7 +202,7 @@ class ResonancePcMarketDataService:
                 message = "行情更新失败，且没有可用的历史行情。"
                 if isinstance(exc, ResonancePcMarketDataError) and exc.code in {
                     "market_fetch_failed", "market_fetch_http_failed", "market_payload_invalid_json",
-                    "market_payload_invalid_type", "market_payload_missing_data",
+                    "market_payload_invalid_type", "market_payload_missing_data", "market_mirror_failed",
                 }:
                     message = f"{message}{exc.message}"
                 raise ResonancePcMarketDataError(
@@ -235,6 +231,39 @@ class ResonancePcMarketDataService:
                 round((time.monotonic() - started) * 1000, 1),
             )
             return result
+
+    def _fetch_remote_prices(self, mode: str, proxy_port: int | None) -> tuple[dict, str | None, str]:
+        config = mirror_config_path() if mode != "columba" else None
+        columba_error = None
+        if mode != "mirror":
+            logger.info("[MarketNetwork] source_attempt source=columba mode=%s", mode)
+            options = {"proxy_port": proxy_port} if proxy_port is not None else {}
+            if config is not None:
+                options["timeout_seconds"] = min(self.timeout_seconds, self.AUTOMATIC_UPSTREAM_SECONDS)
+            try:
+                raw = self.fetch_raw(**options)
+                if not raw["data"]:
+                    raise ResonancePcMarketDataError("market_payload_missing_data", "科伦巴行情没有商品价格。")
+                return raw, None, "refresh"
+            except ResonancePcMarketDataError as exc:
+                if config is None:
+                    raise
+                columba_error = exc.message
+                logger.warning("[MarketNetwork] source_fallback source=columba code=%s reason=%s", exc.code, exc.message)
+
+        started = time.monotonic()
+        logger.info("[MarketNetwork] source_attempt source=mirror mode=%s proxy=%s", mode, proxy_port is not None)
+        try:
+            snapshot = fetch_market_mirror(config, proxy_port=proxy_port, timeout=self.MIRROR_TIMEOUT_SECONDS)
+        except MarketMirrorError as exc:
+            logger.warning("[MarketNetwork] source_failed source=mirror elapsed_ms=%.1f reason=%s",
+                           (time.monotonic() - started) * 1000, exc)
+            message = f"{columba_error}{exc}" if columba_error else str(exc)
+            raise ResonancePcMarketDataError("market_mirror_failed", message) from exc
+        logger.info("[MarketNetwork] source_success source=mirror elapsed_ms=%.1f fetched_at=%s",
+                    (time.monotonic() - started) * 1000, snapshot.fetched_at.isoformat())
+        source = "mirror_fallback" if columba_error else "mirror"
+        return snapshot.payload, snapshot.fetched_at.isoformat(), source
 
     def sync_web_constants(self, sync_buy_lot: bool = True) -> Dict[str, Any]:
         constants_payload = self.fetch_route_constants_payload()
@@ -369,9 +398,9 @@ class ResonancePcMarketDataService:
             rows.append(row)
         return rows
 
-    def fetch_raw(self, *, proxy_port: int | None = None) -> Dict[str, Any]:
+    def fetch_raw(self, *, proxy_port: int | None = None, timeout_seconds: float | None = None) -> Dict[str, Any]:
         try:
-            raw_text = self._fetch_price_bytes(proxy_port).decode("utf-8")
+            raw_text = self._fetch_price_bytes(proxy_port, timeout_seconds).decode("utf-8")
         except urllib.error.HTTPError as exc:
             try:
                 logger.warning(
@@ -392,7 +421,7 @@ class ResonancePcMarketDataService:
                 code="market_payload_invalid_json",
                 message="科伦巴行情接口返回了无法读取的数据。",
             ) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, ssl.SSLCertVerificationError) or getattr(reason, "winerror", None) == 12175:
                 message = "科伦巴行情接口的 HTTPS 证书校验失败，请检查代理软件的 HTTPS 设置。"
@@ -467,31 +496,33 @@ class ResonancePcMarketDataService:
         )
         return payload
 
-    def _fetch_price_bytes(self, proxy_port: int | None) -> bytes:
-        deadline = time.monotonic() + self.timeout_seconds
-        use_windows_fallback = sys.platform == "win32" and proxy_port is None
+    def _fetch_price_bytes(self, proxy_port: int | None, timeout_seconds: float | None) -> bytes:
+        budget = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = time.monotonic() + budget
+        use_windows_fallback = False
         if proxy_port is not None:
-            handler = _LocalMarketProxyHandler(proxy_port)
+            handler = LocalMarketProxyHandler(proxy_port)
             route = "manual_proxy"
         else:
             proxies = urllib.request.getproxies()
             target = urllib.parse.urlsplit(self.api_url)
             handler = urllib.request.ProxyHandler(proxies)
-            route = (
-                "configured_proxy"
-                if proxies.get(target.scheme) and not urllib.request.proxy_bypass(target.netloc)
-                else "direct"
-            )
+            bypass = urllib.request.proxy_bypass(target.netloc)
+            route = "configured_proxy" if proxies.get(target.scheme) and not bypass else "direct"
+            # WinHTTP can consult a separate proxy configuration. Respect an explicit NO_PROXY.
+            use_windows_fallback = sys.platform == "win32" and not (proxies.get("no") and bypass)
         logger.info(
             "[MarketNetwork] request_start route=%s proxies=%s url=%s",
             route, self._proxy_summary(handler.proxies), self.api_url,
         )
         req = urllib.request.Request(self.api_url, headers={"User-Agent": _MARKET_USER_AGENT})
-        opener = urllib.request.build_opener(handler, _MarketRedirectHandler())
-        timeout = self.timeout_seconds * 0.5 if use_windows_fallback else self.timeout_seconds
+        opener = urllib.request.build_opener(handler, RejectRedirects())
+        timeout = budget * 0.5 if use_windows_fallback else budget
         try:
             with opener.open(req, timeout=timeout) as response:
-                body = response.read()
+                body = response.read(MAX_MARKET_BYTES + 1)
+                if len(body) > MAX_MARKET_BYTES:
+                    raise ResonancePcMarketDataError("market_payload_invalid_type", "科伦巴行情响应超过大小限制。")
                 logger.info(
                     "[MarketNetwork] response_success route=%s status=%s final_url=%s "
                     "content_type=%s received_bytes=%s",
@@ -1010,6 +1041,10 @@ class ResonancePcMarketDataService:
                         continue
                     existing = self._load_snapshot_by_id(existing_id)
                     if existing is None:
+                        continue
+                    if existing.get("market_source") != snapshot.get("market_source"):
+                        continue
+                    if snapshot.get("market_source") == "mirror" and existing.get("fetched_at") != snapshot["fetched_at"]:
                         continue
                     deduped = copy.deepcopy(existing)
                     deduped["deduped"] = True

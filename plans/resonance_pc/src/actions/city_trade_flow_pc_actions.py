@@ -58,7 +58,7 @@ from ._operation_progress import (
 from ._depart_button_vision import DepartButtonError, probe_depart_button, wait_depart_button
 from ._city_panel_vision import CityPanelVisionError, open_city_panel, wait_city
 from ._city_shop_entry import CityShopEntryError, enter_city_shop, probe_menu_template, valid_probe
-from .market_data_pc_actions import _market_proxy_request_options, resonance_pc_market_refresh
+from .market_data_pc_actions import _market_request_options, resonance_pc_market_refresh
 from .purchase_book_pc_actions import resonance_pc_use_purchase_books
 from .rubbish_recycling_pc_actions import (
     is_rubbish_recycling_arrival,
@@ -3302,7 +3302,7 @@ async def _preview_trade_plan_from_start_city(
     auto_passenger: bool = False,
     passenger_options: Optional[Dict[str, Any]] = None,
     *,
-    market_proxy_options: dict[str, Any] | None = None,
+    market_options: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     passenger_options = _attached_passenger_options(auto_passenger, passenger_options, trade_mode)
     request = normalize_planning_inputs(locals())
@@ -3339,11 +3339,11 @@ async def _preview_trade_plan_from_start_city(
         resonance_pc_market_refresh,
         force=True,
         resonance_pc_market_data=resonance_pc_market_data,
-        **(market_proxy_options or {}),
+        **(market_options or {}),
     )
     snapshot_id = str(market.get("snapshot_id") or "")
     stale = bool(market.get("stale"))
-    market_source = "fallback_cache" if stale else "refresh"
+    market_source = "fallback_cache" if stale else market.get("market_source", "refresh")
     cities = market.get("cities") if isinstance(market.get("cities"), dict) else {}
     city_payload = cities.get(normalized_start_city_id)
     start_city_name = (
@@ -3468,9 +3468,10 @@ async def resonance_pc_preview_trade_plan_flow(
     book_limit_per_stop: Optional[int] = None,
     market_proxy_mode: str = "automatic",
     market_proxy_port: int | None = None,
+    market_source_mode: str = "automatic",
 ) -> Dict[str, Any]:
     del event_bus, context
-    proxy_options = _market_proxy_request_options(market_proxy_mode, market_proxy_port)
+    market_options = _market_request_options(market_proxy_mode, market_proxy_port, market_source_mode)
     return await _preview_trade_plan_from_start_city(
         start_city_id=start_city_id,
         fatigue_budget=fatigue_budget,
@@ -3500,7 +3501,7 @@ async def resonance_pc_preview_trade_plan_flow(
         resonance_pc_trade_planner=resonance_pc_trade_planner,
         reporter=_ACTIVE_PROGRESS_REPORTER.get(),
         auto_passenger=auto_passenger, passenger_options=passenger_options,
-        market_proxy_options=proxy_options,
+        market_options=market_options,
     )
 
 
@@ -3629,9 +3630,10 @@ async def resonance_pc_auto_cycle_trade_flow(
     book_limit_per_stop: Optional[int] = None,
     market_proxy_mode: str = "automatic",
     market_proxy_port: int | None = None,
+    market_source_mode: str = "automatic",
 ) -> Dict[str, Any]:
     del event_bus
-    proxy_options = _market_proxy_request_options(market_proxy_mode, market_proxy_port)
+    market_options = _market_request_options(market_proxy_mode, market_proxy_port, market_source_mode)
     reporter = _ACTIVE_PROGRESS_REPORTER.get()
     passenger_options = _attached_passenger_options(auto_passenger, passenger_options, trade_mode)
     request = normalize_planning_inputs(locals())
@@ -3748,12 +3750,12 @@ async def resonance_pc_auto_cycle_trade_flow(
         resonance_pc_market_refresh,
         force=True,
         resonance_pc_market_data=resonance_pc_market_data,
-        **proxy_options,
+        **market_options,
     )
     stale = bool(refresh.get("stale"))
     blocked_market = stale and not allow_stale_market
     market_metadata = {
-        "market_source": "fallback_cache" if stale else "refresh",
+        "market_source": "fallback_cache" if stale else refresh.get("market_source", "refresh"),
         "market_refreshed": not stale,
         "market_stale_reason": refresh.get("stale_reason"),
         "market_fetched_at": refresh.get("fetched_at"),

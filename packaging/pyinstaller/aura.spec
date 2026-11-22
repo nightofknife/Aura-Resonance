@@ -64,6 +64,9 @@ hiddenimports = [
     "packages.aura_core.observability.logging.stream_capture",
 ]
 datas.append((str(ROOT / "docs" / "schemas" / "task-schema.json"), "docs/schemas"))
+market_mirror_config = os.environ.get("AURA_PKG_MARKET_MIRROR_FILE")
+if market_mirror_config:
+    datas.append((market_mirror_config, "."))
 
 # Aura uses several lazy package-level exports and importlib-based lookups.
 # Packaging the full framework submodule graph is simpler and more reliable

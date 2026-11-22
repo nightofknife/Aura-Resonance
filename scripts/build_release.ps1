@@ -608,15 +608,34 @@ if (-not $SkipBuild) {
     New-Item -ItemType Directory -Force -Path $DistPath | Out-Null
     New-Item -ItemType Directory -Force -Path $WorkPath | Out-Null
 
-    & $VenvPythonPath -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --distpath $DistPath `
-        --workpath $WorkPath `
-        $SpecFilePath
+    $marketMirrorFile = Join-Path $WorkPath "aura-market-mirror.json"
+    try {
+        Remove-Item Env:AURA_PKG_MARKET_MIRROR_FILE -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($env:AURA_UPDATE_VPS_URL) -and
+            -not [string]::IsNullOrWhiteSpace($env:AURA_UPDATE_VPS_CA_PEM)) {
+            $marketMirrorConfig = @{
+                url = $env:AURA_UPDATE_VPS_URL.Trim()
+                ca_pem = $env:AURA_UPDATE_VPS_CA_PEM.Trim()
+            } | ConvertTo-Json -Compress
+            [System.IO.File]::WriteAllText($marketMirrorFile, $marketMirrorConfig)
+            $env:AURA_PKG_MARKET_MIRROR_FILE = $marketMirrorFile
+        }
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller build failed with exit code $LASTEXITCODE."
+        & $VenvPythonPath -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --distpath $DistPath `
+            --workpath $WorkPath `
+            $SpecFilePath
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller build failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        Remove-Item Env:AURA_PKG_MARKET_MIRROR_FILE -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $marketMirrorFile) {
+            Remove-Item -LiteralPath $marketMirrorFile -Force
+        }
     }
 
     if ($IncludeGui) {

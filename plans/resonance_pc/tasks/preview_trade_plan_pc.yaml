@@ -6,6 +6,12 @@ preview_trade_plan_pc:
     description: Refresh market data and calculate one exact route from a user-selected start city.
     entry_point: true
     inputs:
+      - name: market_source_mode
+        type: string
+        required: false
+        default: automatic
+        enum: [automatic, columba, mirror]
+        description: 行情来源（自动、科伦巴直连或蜜瓜转接）。
       - name: market_proxy_mode
         type: string
         required: false
@@ -388,6 +394,7 @@ preview_trade_plan_pc:
     run:
       action: resonance_pc.preview_trade_plan_flow
       params:
+        market_source_mode: "{{ inputs.market_source_mode | default('automatic') }}"
         market_proxy_mode: "{{ inputs.market_proxy_mode | default('automatic') }}"
         market_proxy_port: "{{ inputs.market_proxy_port | default(none) }}"
         auto_passenger: "{{ inputs.auto_passenger | default(false) }}"

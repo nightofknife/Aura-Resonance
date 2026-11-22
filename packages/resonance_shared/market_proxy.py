@@ -1,6 +1,12 @@
-"""Shared settings for fetching Columba market prices."""
+"""Shared settings for fetching market prices."""
 
 from __future__ import annotations
+
+
+def validate_market_source(mode: str) -> str:
+    if mode not in ("automatic", "columba", "mirror"):
+        raise ValueError("行情来源必须为自动、科伦巴直连或蜜瓜转接。")
+    return mode
 
 
 def normalize_market_proxy(

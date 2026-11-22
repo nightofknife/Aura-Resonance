@@ -25,7 +25,7 @@ from packages.resonance_shared.passenger_parameters import DEFAULT_PASSENGER_OPT
 from packages.resonance_shared.freight_parameters import (
     DEFAULT_RECOVERY_THRESHOLDS, validate_book_limit_per_stop,
 )
-from packages.resonance_shared.market_proxy import normalize_market_proxy
+from packages.resonance_shared.market_proxy import normalize_market_proxy, validate_market_source
 
 
 PC_TRADE_CITY_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -170,7 +170,7 @@ TRADE_PREVIEW_INPUT_KEYS: tuple[str, ...] = (
 )
 TRADE_PREVIEW_REQUEST_KEYS = (
     *TRADE_PREVIEW_INPUT_KEYS,
-    "market_proxy_mode", "market_proxy_port",
+    "market_proxy_mode", "market_proxy_port", "market_source_mode",
 )
 
 
@@ -343,14 +343,17 @@ class ResonanceConfigRepository:
             try:
                 values = json.loads(raw)
                 if isinstance(values, dict):
-                    return normalize_market_proxy(
+                    proxy = normalize_market_proxy(
                         values.get("market_proxy_mode", "automatic"),
                         values.get("market_proxy_port"),
                         allow_incomplete=True,
                     )
+                    return {**proxy, "market_source_mode": validate_market_source(
+                        values.get("market_source_mode", "automatic"),
+                    )}
             except (TypeError, ValueError):
                 pass
-        return normalize_market_proxy("automatic", None)
+        return {**normalize_market_proxy("automatic", None), "market_source_mode": "automatic"}
 
     def save_market_proxy(self, values: Mapping[str, Any]) -> None:
         normalized = normalize_market_proxy(
@@ -358,6 +361,7 @@ class ResonanceConfigRepository:
             values.get("market_proxy_port"),
             allow_incomplete=True,
         )
+        normalized["market_source_mode"] = validate_market_source(values.get("market_source_mode", "automatic"))
         self._save_freight_inputs_json(MARKET_PROXY_KEY, normalized)
 
     def load_trade_preview_inputs(self) -> dict[str, Any]:

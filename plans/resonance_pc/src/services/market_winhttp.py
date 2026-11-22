@@ -19,6 +19,8 @@ _QUERY_STATUS_CODE = 19
 _QUERY_RAW_HEADERS_CRLF = 22
 _QUERY_FLAG_NUMBER = 0x20000000
 _ERROR_WINHTTP_TIMEOUT = 12002
+_OPTION_REDIRECT_POLICY = 88
+_REDIRECT_POLICY_NEVER = 0
 _LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _READ_BUFFER_BYTES = 64 * 1024
@@ -57,6 +59,7 @@ def _load_winhttp():
         ("WinHttpReceiveResponse", wintypes.BOOL, (handle, buffer_ptr)),
         ("WinHttpQueryHeaders", wintypes.BOOL, (handle, dword, wide_string, buffer_ptr, dword_ptr, dword_ptr)),
         ("WinHttpReadData", wintypes.BOOL, (handle, buffer_ptr, dword, dword_ptr)),
+        ("WinHttpSetOption", wintypes.BOOL, (handle, dword, buffer_ptr, dword)),
         ("WinHttpCloseHandle", wintypes.BOOL, (handle,)),
     )
     for name, result_type, argument_types in signatures:
@@ -128,6 +131,10 @@ def get_market_url(url: str, *, user_agent: str, timeout_seconds: float) -> byte
             None, None, None, _FLAG_SECURE if secure else 0,
         )
         handles.callback(dll.WinHttpCloseHandle, request)
+
+        redirect_policy = wintypes.DWORD(_REDIRECT_POLICY_NEVER)
+        _checked(dll.WinHttpSetOption, request, _OPTION_REDIRECT_POLICY,
+                 ctypes.byref(redirect_policy), ctypes.sizeof(redirect_policy))
 
         _set_remaining_timeout(dll, request, deadline)
         _checked(dll.WinHttpSendRequest, request, None, 0, None, 0, 0, 0)
