@@ -4,15 +4,24 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 FREIGHT_MODES = ("free", "fixed")
+FATIGUE_MEDICINES = {
+    "lollipop": "提神棒棒糖",
+    "gum": "提神口香糖",
+    "cactus": "仙人掌提神跳糖",
+}
+FATIGUE_MEDICINE_LIMIT_MAX = 100_000
 DEFAULT_RECOVERY_THRESHOLDS = {
     "sparkling_water_start_threshold": 600,
     "sparkling_water_stop_threshold": 100,
     "bento_start_threshold": 600,
     "bento_stop_threshold": 100,
+    "fatigue_medicine_start_threshold": 600,
+    "fatigue_medicine_stop_threshold": 100,
 }
 FREIGHT_RECOVERY_THRESHOLD_KEYS = (
     "sparkling_water_start_threshold", "sparkling_water_stop_threshold",
     "bento_start_threshold", "bento_stop_threshold",
+    "fatigue_medicine_start_threshold", "fatigue_medicine_stop_threshold",
 )
 
 
@@ -21,6 +30,7 @@ def validate_freight_recovery_thresholds(source: Mapping[str, Any]) -> None:
     for enabled, prefix, label in (
         ("auto_sparkling_water", "sparkling_water", "气泡水"),
         ("auto_bento", "bento", "便当"),
+        ("use_fatigue_medicine", "fatigue_medicine", "疲劳药"),
     ):
         if not source.get(enabled):
             continue
@@ -36,6 +46,18 @@ def validate_book_limit_per_stop(value: Any) -> int | None:
     if value is not None and (type(value) is not int or value < 0):
         raise ValueError("单站用书上限（book_limit_per_stop）必须为非负整数。")
     return value or None
+
+
+def normalize_fatigue_medicine_limits(value: Any) -> dict[str, int]:
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping) or value.keys() - FATIGUE_MEDICINES.keys():
+        raise ValueError("疲劳药上限只接受棒棒糖、口香糖和跳糖的设置。")
+    limits = {key: value.get(key, 0) for key in FATIGUE_MEDICINES}
+    for key, count in limits.items():
+        if type(count) is not int or not 0 <= count <= FATIGUE_MEDICINE_LIMIT_MAX:
+            raise ValueError(f"{FATIGUE_MEDICINES[key]}上限必须是 0 至 {FATIGUE_MEDICINE_LIMIT_MAX} 的整数。")
+    return limits
 
 
 FREIGHT_PLANNING_KEYS = (
@@ -92,9 +114,12 @@ def effective_freight_inputs(source: Mapping[str, Any]) -> dict[str, Any]:
         result.pop("sparkling_water_stop_threshold", None)
     result.pop("recovery_priority", None)
     result.pop("base_fatigue_reserve", None)
+    result.pop("allowed_fatigue_medicines", None)
+    result.pop("fatigue_medicine_max_uses", None)
     if result.get("use_fatigue_medicine") is False:
-        result.pop("allowed_fatigue_medicines", None)
-        result.pop("fatigue_medicine_max_uses", None)
+        result.pop("fatigue_medicine_limits", None)
+        result.pop("fatigue_medicine_start_threshold", None)
+        result.pop("fatigue_medicine_stop_threshold", None)
     return result
 
 

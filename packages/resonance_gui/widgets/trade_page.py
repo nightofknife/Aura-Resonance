@@ -80,9 +80,9 @@ from ..logic import (
     average_book_profit_text,
 )
 from packages.resonance_shared.freight_parameters import (
-    FREIGHT_PLANNING_KEYS, FREIGHT_RECOVERY_THRESHOLD_KEYS,
+    FATIGUE_MEDICINES, FATIGUE_MEDICINE_LIMIT_MAX, FREIGHT_PLANNING_KEYS, FREIGHT_RECOVERY_THRESHOLD_KEYS,
     DEFAULT_RECOVERY_THRESHOLDS,
-    freight_control_state, validate_freight_recovery_thresholds,
+    freight_control_state, normalize_fatigue_medicine_limits, validate_freight_recovery_thresholds,
 )
 from packages.resonance_shared.market_proxy import normalize_market_proxy
 from ..run_failure import present_run_failure
@@ -506,8 +506,9 @@ class TradePage(QWidget):
             "auto_bento": "实际疲劳严格超过启动阈值时，按优先级逐份吃便当；每份后实测，持续到停止下限，结束返回实际疲劳。",
             "auto_pickup": "货运途中按设定间隔自动拣货，普通行车和拖车均适用。自动前往固定线路起点时，仅拖车途中拣货。",
             "auto_pickup_interval_sec": "两次拣货点击之间至少等待的秒数，范围 0.1～60 秒；不改变按住时长，到站检查和停止响应不随此间隔延迟。",
-            "use_fatigue_medicine": "行车任务允许使用疲劳药；默认关闭，开启后仍受使用上限限制。",
-            "fatigue_medicine_max_uses": "本次行车允许使用疲劳药的次数上限；仅在允许使用疲劳药时生效。",
+            "use_fatigue_medicine": "交易后先处理气泡水和便当，再按三种药各自的上限判断用药。",
+            "fatigue_medicine_start_threshold": "当前疲劳严格大于此值才开始用药。",
+            "fatigue_medicine_stop_threshold": "游戏预览低于此值时不会补充。没有可用药能在这条线以上继续降低疲劳时结束。",
             "auto_cape_island_investment": "货运到达蜃息岛时尝试投资；不会为投资额外改变货运线路。",
             "auto_trade_goods_investment": "到站交易前按目标等级投资交易品；实际等级不足 10 时停止，受阻后最多尝试下一商品一次。",
             "auto_rubbish_recycling": "到达符合条件的城市时尝试垃圾回收，不为回收额外改变线路。",
@@ -941,7 +942,7 @@ class TradePage(QWidget):
 
     def _build_recovery_parameters(self, layout: QVBoxLayout) -> None:
         content = layout.parentWidget()
-        parameter_heading(layout, "到站恢复")
+        parameter_heading(layout, "交易后恢复")
         self.auto_sparkling_water = FreightSwitch("自动喝气泡水", content)
         self.auto_bento = FreightSwitch("自动吃便当", content)
         self.auto_bento.toggled.connect(self._sync_bento_type_checks)
@@ -963,9 +964,13 @@ class TradePage(QWidget):
         self.bento_priority_panel = self._build_bento_priority_panel(content)
         layout.addWidget(self.bento_priority_panel)
 
-        parameter_heading(layout, "行车恢复")
-        self.use_fatigue_medicine = FreightSwitch("行车使用疲劳药", content)
-        parameter_row(layout, "行车使用疲劳药", self.use_fatigue_medicine)
+        parameter_divider(layout)
+        self.use_fatigue_medicine = FreightSwitch("自动使用疲劳药", content)
+        parameter_row(layout, "自动使用疲劳药", self.use_fatigue_medicine)
+        self.medicine_threshold_fields = parameter_fields(
+            layout, ("启动阈值", self.fatigue_medicine_start_threshold),
+            ("停止下限", self.fatigue_medicine_stop_threshold),
+        )
         self.medicine_panel = self._build_medicine_panel(content)
         layout.addWidget(self.medicine_panel)
         layout.addStretch()
@@ -1029,24 +1034,19 @@ class TradePage(QWidget):
         return panel
 
     def _build_medicine_panel(self, parent: QWidget) -> QWidget:
-        self.fatigue_medicine_max_uses = self._spin(0, 100000)
-        self.allowed_fatigue_medicines: list[str] = []
-        self.medicine_checks: dict[str, QCheckBox] = {}
+        self.medicine_limits = {}
         panel = QWidget(parent)
         medicine_layout = QGridLayout(panel)
         medicine_layout.setContentsMargins(0, 0, 0, 0)
-        for index, name in enumerate(("提神棒棒糖", "提神口香糖", "仙人掌提神跳糖", "桦石")):
-            check = QCheckBox(name, panel)
-            check.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-            check.setToolTip(f"允许行车时使用{name}；仅在疲劳药开关开启时生效。")
-            self.medicine_checks[name] = check
-            medicine_layout.addWidget(check, index // 2, index % 2)
-        self.medicine_limit_label = QLabel("疲劳药使用上限", panel)
-        self.fatigue_medicine_max_uses.setMaximumWidth(220)
-        self.fatigue_medicine_max_uses.setSuffix(" 次")
-        medicine_layout.addWidget(self.medicine_limit_label, 2, 0)
-        medicine_layout.addWidget(self.fatigue_medicine_max_uses, 2, 1)
-        medicine_layout.addWidget(QLabel("仅使用勾选的疲劳药；会消耗道具。", panel), 3, 0, 1, 2)
+        for index, (key, name) in enumerate(FATIGUE_MEDICINES.items()):
+            field = self._spin(0, FATIGUE_MEDICINE_LIMIT_MAX)
+            field.setSpecialValueText("不使用")
+            field.setSuffix(" 份")
+            field.setMaximumWidth(220)
+            field.setToolTip(f"整次跑商最多使用多少份{name}，填 0 时跳过。")
+            self.medicine_limits[key] = field
+            medicine_layout.addWidget(QLabel(f"{name}上限", panel), index, 0)
+            medicine_layout.addWidget(field, index, 1)
         return panel
 
     def add_route_city(self, city_id: str) -> None:
@@ -1090,6 +1090,7 @@ class TradePage(QWidget):
         self.water_threshold_fields.setVisible(state["water"])
         self.bento_threshold_fields.setVisible(state["bento"])
         self.bento_priority_panel.setVisible(state["bento"])
+        self.medicine_threshold_fields.setVisible(state["medicine"])
         self.medicine_panel.setVisible(state["medicine"])
         for widget, enabled in (
             (self.book_budget, state["book_count"]), (self.book_policy, state["book_rules"]),
@@ -1102,8 +1103,9 @@ class TradePage(QWidget):
             (self.sparkling_water_stop_threshold, state["water"]),
             (self.bento_start_threshold, state["bento"]),
             (self.bento_stop_threshold, state["bento"]),
+            (self.fatigue_medicine_start_threshold, state["medicine"]),
+            (self.fatigue_medicine_stop_threshold, state["medicine"]),
             (self.bento_priority_panel, state["bento"]), (self.medicine_panel, state["medicine"]),
-            (self.fatigue_medicine_max_uses, state["medicine"]),
         ):
             widget.setEnabled(enabled and not self._busy)
         route = [str(self.fixed_route.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(self.fixed_route.count())]
@@ -1811,10 +1813,9 @@ class TradePage(QWidget):
         self._sync_trailer_controls()
         self._sync_pickup_controls()
         self.use_fatigue_medicine.setChecked(bool(values.get("use_fatigue_medicine", False)))
-        self.allowed_fatigue_medicines = list(values.get("allowed_fatigue_medicines") or [])
-        for name, check in self.medicine_checks.items():
-            check.setChecked(name in self.allowed_fatigue_medicines)
-        self.fatigue_medicine_max_uses.setValue(self._input_integer(values, "fatigue_medicine_max_uses", 4))
+        limits = normalize_fatigue_medicine_limits(values.get("fatigue_medicine_limits"))
+        for key, field in self.medicine_limits.items():
+            field.setValue(limits[key])
         self.auto_cape_island_investment.setChecked(
             bool(values.get("auto_cape_island_investment", True))
         )
@@ -1917,8 +1918,7 @@ class TradePage(QWidget):
             "auto_pickup": self.auto_pickup.isChecked(),
             "auto_pickup_interval_sec": self.auto_pickup_interval_sec.value(),
             "use_fatigue_medicine": self.use_fatigue_medicine.isChecked(),
-            "allowed_fatigue_medicines": [name for name, check in self.medicine_checks.items() if check.isChecked()],
-            "fatigue_medicine_max_uses": self.fatigue_medicine_max_uses.value(),
+            "fatigue_medicine_limits": {key: field.value() for key, field in self.medicine_limits.items()},
             "auto_cape_island_investment": self.auto_cape_island_investment.isChecked(),
             "auto_trade_goods_investment": self.auto_trade_goods_investment.isChecked(),
             "trade_goods_investment_mode": self.trade_goods_investment_mode.value(),
@@ -1973,8 +1973,6 @@ class TradePage(QWidget):
                      negotiation_policy=self.negotiation_policy.currentData(),
                      negotiation_max_attempts=self.negotiation_max_attempts.value(),
                      bento_priority=self._selected_bento_priority(),
-                     allowed_fatigue_medicines=[name for name, check in self.medicine_checks.items() if check.isChecked()],
-                     fatigue_medicine_max_uses=self.fatigue_medicine_max_uses.value(),
                      start_city_id=str(self.start_city.currentData() or ""))
         return state
 
@@ -2433,7 +2431,7 @@ class TradePage(QWidget):
             self.fixed_panel,
             self.target_profit,
             self.use_fatigue_medicine,
-            self.fatigue_medicine_max_uses,
+            *self.medicine_limits.values(),
             *self.mode_buttons.values(),
         ):
             if widget is not None:
@@ -2491,6 +2489,7 @@ class TradePage(QWidget):
                     **self._recovery_threshold_values(),
                     "auto_sparkling_water": self.auto_sparkling_water.isChecked(),
                     "auto_bento": self.auto_bento.isChecked(),
+                    "use_fatigue_medicine": self.use_fatigue_medicine.isChecked(),
                 })
             except ValueError as exc:
                 return str(exc)

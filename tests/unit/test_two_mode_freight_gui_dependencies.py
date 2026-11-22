@@ -217,16 +217,14 @@ def test_negotiation_and_medicine_controls_unlock_and_relock_after_running(page)
     choose(page.negotiation_policy, "auto")
     assert page.negotiation_max_attempts.isEnabled()
     page.use_fatigue_medicine.setChecked(False)
-    assert not page.fatigue_medicine_max_uses.isEnabled()
-    assert all(not button.isEnabled() for button in page.medicine_checks.values())
+    assert all(not field.isEnabled() for field in page.medicine_limits.values())
     page.use_fatigue_medicine.setChecked(True)
-    assert page.fatigue_medicine_max_uses.isEnabled()
-    assert all(button.isEnabled() for button in page.medicine_checks.values())
+    assert all(field.isEnabled() for field in page.medicine_limits.values())
     page.set_busy(True)
-    assert not page.fatigue_medicine_max_uses.isEnabled()
+    assert all(not field.isEnabled() for field in page.medicine_limits.values())
     assert not page.negotiation_max_attempts.isEnabled()
     page.set_busy(False)
-    assert page.fatigue_medicine_max_uses.isEnabled()
+    assert all(field.isEnabled() for field in page.medicine_limits.values())
     assert page.negotiation_max_attempts.isEnabled()
 
 
@@ -239,9 +237,8 @@ def test_inactive_values_survive_repository_reload_but_not_runtime_projection(pa
     page.sparkling_water_stop_threshold.setValue(231)
     page.bento_start_threshold.setValue(700)
     page.bento_stop_threshold.setValue(200)
-    page.fatigue_medicine_max_uses.setValue(7)
-    medicine = next(iter(page.medicine_checks))
-    page.medicine_checks[medicine].setChecked(True)
+    page.medicine_limits["lollipop"].setValue(7)
+    page.medicine_limits["gum"].setValue(2)
     page.target_profit.setValue(123)
     choose(page.book_usage, "none")
     choose(page.negotiation_policy, "disabled")
@@ -260,16 +257,15 @@ def test_inactive_values_survive_repository_reload_but_not_runtime_projection(pa
         assert restored.sparkling_water_stop_threshold.value() == 231
         assert restored.bento_start_threshold.value() == 700
         assert restored.bento_stop_threshold.value() == 200
-        assert restored.fatigue_medicine_max_uses.value() == 7
-        assert restored.medicine_checks[medicine].isChecked()
+        assert restored.medicine_limits["lollipop"].value() == 7
+        assert restored.medicine_limits["gum"].value() == 2
         assert restored.target_profit.value() == 123
         runtime = restored.collect_task_inputs()
         assert not {"book_profit_threshold", "book_policy", "negotiation_max_attempts",
                     "sparkling_water_start_threshold", "sparkling_water_stop_threshold",
-                    "bento_start_threshold", "bento_stop_threshold", "bento_priority", "allowed_fatigue_medicines",
-                    "fatigue_medicine_max_uses", "target_profit"} & runtime.keys()
+                    "bento_start_threshold", "bento_stop_threshold", "bento_priority", "fatigue_medicine_limits", "target_profit"} & runtime.keys()
         restored.use_fatigue_medicine.setChecked(True)
-        assert medicine in restored.collect_task_inputs()["allowed_fatigue_medicines"]
+        assert restored.collect_task_inputs()["fatigue_medicine_limits"] == {"lollipop": 7, "gum": 2, "cactus": 0}
     finally:
         restored.close()
         restored.deleteLater()
@@ -566,9 +562,9 @@ def test_legacy_reserve_uses_explicit_new_defaults_and_never_becomes_a_threshold
         "base_fatigue_reserve": 200, "auto_sparkling_water": True, "auto_bento": True}))
     loaded = page._settings.load_trade_inputs()
     assert "base_fatigue_reserve" not in loaded
-    assert [loaded[key] for key in FREIGHT_RECOVERY_THRESHOLD_KEYS] == [600, 100, 600, 100]
+    assert [loaded[key] for key in FREIGHT_RECOVERY_THRESHOLD_KEYS] == [600, 100, 600, 100, 600, 100]
     page.set_inputs(loaded)
-    assert [getattr(page, key).value() for key in FREIGHT_RECOVERY_THRESHOLD_KEYS] == [600, 100, 600, 100]
+    assert [getattr(page, key).value() for key in FREIGHT_RECOVERY_THRESHOLD_KEYS] == [600, 100, 600, 100, 600, 100]
     assert page.collect_task_inputs()["sparkling_water_stop_threshold"] == 100
 
 

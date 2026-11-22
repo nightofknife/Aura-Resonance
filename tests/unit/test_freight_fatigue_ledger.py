@@ -24,7 +24,7 @@ def test_trade_observation_replaces_negotiation_and_previous_route_consumption()
     assert ledger.observe_travel(normal(), 30) == 243
 
 
-@pytest.mark.parametrize("source", ["profile", "water", "bento"])
+@pytest.mark.parametrize("source", ["profile", "water", "bento", "medicine"])
 def test_recovery_and_fallback_observations_rebase(source):
     ledger = FreightFatigueLedger()
     ledger.set_observed(600, "trade_page")
@@ -73,9 +73,6 @@ def test_over_capacity_is_valid_game_state_and_never_clamped():
     (normal(encounter_actions=1), 50, "travel_encounter_actions"),
     (normal(encounter_actions="1"), 50, "travel_encounter_usage_unknown"),
     (normal(encounter_actions=None), 50, "travel_encounter_usage_unknown"),
-    (normal(travel_method="trailer"), 50, "travel_trailer_used"),
-    (normal(trailer_service={"departed": True}), 50, "travel_trailer_used"),
-    (normal(trailer_service={"status": "departed"}), 50, "travel_trailer_used"),
     (normal(travel_method="unknown"), 50, "travel_method_unknown"),
     (normal(), None, "travel_fatigue_cost_unknown"),
     (normal(), -1, "travel_fatigue_cost_unknown"),
@@ -94,6 +91,16 @@ def test_unpredictable_travel_requires_fallback_without_faking_actual(travel, co
     assert ledger.observe_travel(normal(), 10) is None
     assert ledger.set_observed(120, "profile") == 120
     assert ledger.observe_travel(normal(), 10) == 130
+
+
+@pytest.mark.parametrize("travel", [normal(travel_method="trailer"),
+                                     normal(trailer_service={"status": "departed"})])
+def test_confirmed_trailer_uses_the_same_leg_cost(travel):
+    ledger = FreightFatigueLedger()
+    ledger.set_observed(77, "trade_page")
+    ledger.begin_travel()
+    assert ledger.observe_travel(travel, 50) == 127
+    assert ledger.snapshot()["source"] == "route_derived"
 
 
 def test_denied_trailer_attempt_does_not_invalidate_confirmed_normal_travel():

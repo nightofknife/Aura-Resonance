@@ -82,43 +82,18 @@ def _normalize_pickup_interval(value: Any) -> float:
 
 _FATIGUE_PANEL_TEMPLATE = "templates/recovery/fatigue/controls/panel_title.png"
 _FATIGUE_BACK_TEMPLATE = "templates/recovery/fatigue/controls/back_button.png"
-_FATIGUE_MEDICINE_CONFIRM_TEMPLATE = "templates/recovery/fatigue/medicine/confirm_button.png"
 
 _GO_DESTINATION_REGION = [900, 580, 340, 120]
 _ARRIVAL_BUTTON_REGION = [780, 325, 240, 70]
 _DEPART_CONFIRM_REGION = [450, 360, 760, 220]
 _FATIGUE_PANEL_REGION = [70, 80, 520, 190]
 _FATIGUE_BACK_REGION = [0, 0, 260, 90]
-_FATIGUE_MEDICINE_CONFIRM_REGION = [620, 520, 660, 120]
 
 _DEFAULT_ARRIVAL_TIMEOUT_SECONDS = 1800.0
 
 _WEEKLY_NOTICE_CHECKBOX = [890, 523]
 _DEPART_CONFIRM_POINT = [852, 447]
 _FATIGUE_BACK_FALLBACK_POINT = [82, 36]
-
-_FATIGUE_MEDICINE_ORDER: List[Dict[str, Any]] = [
-    {
-        "name": "提神棒棒糖",
-        "template": "templates/recovery/fatigue/medicine/stimulant_lollipop_button.png",
-        "region": [540, 310, 240, 90],
-    },
-    {
-        "name": "提神口香糖",
-        "template": "templates/recovery/fatigue/medicine/stimulant_gum_button.png",
-        "region": [780, 310, 240, 90],
-    },
-    {
-        "name": "仙人掌提神跳糖",
-        "template": "templates/recovery/fatigue/medicine/cactus_jump_candy_button.png",
-        "region": [540, 560, 240, 90],
-    },
-    {
-        "name": "桦石",
-        "template": "templates/recovery/fatigue/medicine/birch_stone_button.png",
-        "region": [780, 560, 240, 90],
-    },
-]
 
 _CITY_KEY_DISPLAY_NAME: Dict[str, str] = {
     "anita_energy_research_institute": "阿妮塔能源研究所",
@@ -762,61 +737,6 @@ def _click_marker_hit(app: Any, hit: Dict[str, Any]) -> bool:
     return True
 
 
-def _normalize_allowed_fatigue_medicines(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    raw_items: List[Any]
-    if isinstance(value, str):
-        raw_items = [item for item in re.split(r"[,，;；\n]+", value) if item.strip()]
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = list(value)
-    else:
-        raw_items = [value]
-    known_by_norm = {_normalize_text(item["name"]): item["name"] for item in _FATIGUE_MEDICINE_ORDER}
-    allowed: set[str] = set()
-    for raw in raw_items:
-        norm = _normalize_text(str(raw or ""))
-        if norm in known_by_norm:
-            allowed.add(known_by_norm[norm])
-    return allowed
-
-
-def _merge_medicine_usage(usage: Dict[str, int]) -> List[Dict[str, Any]]:
-    result: List[Dict[str, Any]] = []
-    for item in _FATIGUE_MEDICINE_ORDER:
-        name = item["name"]
-        count = int(usage.get(name) or 0)
-        if count > 0:
-            result.append({"name": name, "count": count})
-    return result
-
-
-def _find_allowed_fatigue_medicine(
-    app: Any,
-    vision: Any,
-    allowed_names: set[str],
-    *,
-    threshold: float,
-    excluded_names: Optional[set[str]] = None,
-) -> Optional[Dict[str, Any]]:
-    excluded = excluded_names or set()
-    for item in _FATIGUE_MEDICINE_ORDER:
-        name = str(item["name"])
-        if name not in allowed_names or name in excluded:
-            continue
-        match = _match_template_in_region(
-            app=app,
-            vision=vision,
-            template=str(item["template"]),
-            region=list(item["region"]),
-            threshold=float(threshold),
-            use_grayscale=True,
-        )
-        if match.get("found"):
-            return {**item, "match": match}
-    return None
-
-
 def _click_fatigue_back(app: Any, vision: Any, threshold: float = 0.95) -> Dict[str, Any]:
     match = _match_template_in_region(
         app=app,
@@ -833,54 +753,11 @@ def _click_fatigue_back(app: Any, vision: Any, threshold: float = 0.95) -> Dict[
     return {"clicked": True, "method": "fallback", "match": match}
 
 
-def _wait_and_click_fatigue_medicine_confirm(
-    app: Any,
-    vision: Any,
-    ocr: Any,
-    *,
-    threshold: float,
-    timeout_sec: float = 3.0,
-    interval_sec: float = 0.3,
-) -> Dict[str, Any]:
-    _check_intercity_cancelled()
-    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
-    interval = max(float(interval_sec), 0.1)
-    last_match: Dict[str, Any] = {"found": False}
-    while time.monotonic() <= deadline:
-        _check_intercity_cancelled()
-        match = _match_template_in_region(
-            app=app,
-            vision=vision,
-            template=_FATIGUE_MEDICINE_CONFIRM_TEMPLATE,
-            region=_FATIGUE_MEDICINE_CONFIRM_REGION,
-            threshold=float(threshold),
-            use_grayscale=True,
-        )
-        last_match = match
-        if _click_template_match(app, match):
-            return {"clicked": True, "method": "template", "match": match}
-        _sleep_with_cancel(interval)
-
-    text_hit = _wait_for_marker_hit(
-        app=app,
-        ocr=ocr,
-        markers=("补充",),
-        timeout_sec=1.0,
-        interval_sec=0.3,
-        region=_FATIGUE_MEDICINE_CONFIRM_REGION,
-    )
-    if text_hit is not None and _click_marker_hit(app, text_hit):
-        return {"clicked": True, "method": "text", "text": text_hit, "match": last_match}
-    return {"clicked": False, "method": None, "match": last_match}
-
-
 def _blocked_departure_result(
     *,
     reason: str,
     selected: Optional[Dict[str, Any]],
     to_city_name: str,
-    medicine_usage: Dict[str, int],
-    medicine_limit: int,
     back_result: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -897,16 +774,13 @@ def _blocked_departure_result(
         "attempts_used": selected.get("attempts_used"),
         "arrival_status": None,
         "encounter_actions": 0,
-        "fatigue_medicine_used": _merge_medicine_usage(medicine_usage),
-        "fatigue_medicine_use_count": sum(int(v) for v in medicine_usage.values()),
-        "fatigue_medicine_limit": int(medicine_limit),
     }
     if back_result is not None:
         payload["fatigue_back"] = back_result
     if extra:
         payload.update(extra)
     observe_operation("travel.fatigue_recovery", "疲劳恢复未完成", "blocked",
-                      reason=reason, fatigue_medicine_used=payload["fatigue_medicine_used"])
+                      reason=reason)
     gate = payload.get("departure_gate") or {}
     if "trailer_service" in gate:
         payload["trailer_service"] = gate["trailer_service"]
@@ -1219,10 +1093,6 @@ def resonance_pc_intercity_depart_and_wait(
     click_y_offset: int = -15,
     drag_duration_sec: float = 1.0,
     drag_hold_sec: float = 0.5,
-    use_fatigue_medicine: bool = False,
-    allowed_fatigue_medicines: Optional[List[str]] = None,
-    fatigue_medicine_max_uses: int = 4,
-    medicine_button_threshold: float = 0.95,
     app: Any = None,
     ocr: Any = None,
     vision: Any = None,
@@ -1248,268 +1118,148 @@ def resonance_pc_intercity_depart_and_wait(
     _native_navigation_context(app, to_city_name, from_city_name)
 
     pickup_interval = _normalize_pickup_interval(auto_pickup_interval_sec)
-    allowed_names = _normalize_allowed_fatigue_medicines(allowed_fatigue_medicines)
     pickup_requested = auto_pickup and (use_trailer or not pickup_on_trailer_only)
     if pickup_requested and not Path(_resolve_plan_template_path(_TRAVEL_HORN_TEMPLATE)).is_file():
         _raise_error(code="pickup_template_missing", message="Travel horn template is missing.")
-    medicine_limit = max(int(fatigue_medicine_max_uses), 0)
-    medicine_usage: Dict[str, int] = {}
-    selected: Optional[Dict[str, Any]] = None
-    ineffective_medicines: set[str] = set()
-    departure_attempts = 0
-    trailer_enabled = use_trailer
     trailer_attempts: List[Dict[str, Any]] = []
 
-    while True:
-        _check_intercity_cancelled()
-        observe_operation("travel.destination", "进入地图并选择目的地", "started", to_city_name=to_city_name)
-        _open_intercity_map(app, vision)
+    _check_intercity_cancelled()
+    observe_operation("travel.destination", "进入地图并选择目的地", "started", to_city_name=to_city_name)
+    _open_intercity_map(app, vision)
 
-        selected = resonance_pc_select_intercity_destination(
-            to_city_name=to_city_name,
-            from_city_name=from_city_name,
-            location_file_path=location_file_path,
-            city_search_region=city_search_region,
-            drag_center=drag_center,
-            drag_span_px=drag_span_px,
-            max_search_steps=max_search_steps,
-            fallback_enabled=fallback_enabled,
-            target_match_mode=target_match_mode,
-            click_y_offset=click_y_offset,
-            drag_duration_sec=drag_duration_sec,
-            drag_hold_sec=drag_hold_sec,
-            app=app,
-            ocr=ocr,
+    selected = resonance_pc_select_intercity_destination(
+        to_city_name=to_city_name,
+        from_city_name=from_city_name,
+        location_file_path=location_file_path,
+        city_search_region=city_search_region,
+        drag_center=drag_center,
+        drag_span_px=drag_span_px,
+        max_search_steps=max_search_steps,
+        fallback_enabled=fallback_enabled,
+        target_match_mode=target_match_mode,
+        click_y_offset=click_y_offset,
+        drag_duration_sec=drag_duration_sec,
+        drag_hold_sec=drag_hold_sec,
+        app=app,
+        ocr=ocr,
+    )
+
+    observe_operation("travel.destination", "进入地图并选择目的地", "completed",
+                      to_city_name=to_city_name, mode=selected.get("mode"))
+    observe_operation("travel.departure_confirming", "前往目的地并等待出发判定", "started")
+
+    gate = None
+    if use_trailer:
+        # Import locally: the standalone operation reuses navigation observation constants.
+        from .trailer_service_pc_actions import resonance_pc_use_trailer_service_from_map
+        trailer = resonance_pc_use_trailer_service_from_map(
+            daily_first_n=trailer_daily_first_n, payment=trailer_payment,
+            app=app, ocr=ocr, vision=vision,
         )
-
-        observe_operation("travel.destination", "进入地图并选择目的地", "completed",
-                          to_city_name=to_city_name, mode=selected.get("mode"))
-        observe_operation("travel.departure_confirming", "前往目的地并等待出发判定", "started")
-
-        gate = None
-        if trailer_enabled:
-            # Import locally: the standalone operation reuses navigation observation constants.
-            from .trailer_service_pc_actions import resonance_pc_use_trailer_service_from_map
-            trailer = resonance_pc_use_trailer_service_from_map(
-                daily_first_n=trailer_daily_first_n, payment=trailer_payment,
-                app=app, ocr=ocr, vision=vision,
+        trailer_attempts.append(trailer)
+        if verified_quota_skip(trailer):
+            logger.info("[IntercityDeparture] towing quota ended; ordinary departure reason=%s", trailer["reason"])
+        elif (trailer.get("success") is True and trailer.get("status") == "departed"
+              and trailer.get("submitted") is True and trailer.get("departed") is True
+              and trailer.get("page_state") in {"traveling", "arrival_ready"}):
+            gate = {"state": "trailer_departed"}
+        elif (trailer.get("status") == "blocked" and trailer.get("reason") == "fatigue_recovery_required"
+              and trailer.get("submitted") is True and trailer.get("departed") is False
+              and trailer.get("page_state") == "fatigue_panel"):
+            # A confirmed fatigue panel does not prove that payment was rejected.
+            # Leave this submitted attempt for the user instead of spending again.
+            return _blocked_departure_result(
+                reason="trailer_submission_requires_review", selected=selected,
+                to_city_name=to_city_name,
+                extra={"departure_attempts": 1, "page_state": "fatigue_panel",
+                       "departure_gate": {"state": "fatigue_panel", "trailer_service": trailer,
+                                          "trailer_attempts": trailer_attempts}},
             )
-            trailer_attempts.append(trailer)
-            if verified_quota_skip(trailer):
-                trailer_enabled = False
-                logger.info("[IntercityDeparture] towing quota ended; ordinary departure reason=%s", trailer["reason"])
-            elif (trailer.get("success") is True and trailer.get("status") == "departed"
-                  and trailer.get("submitted") is True and trailer.get("departed") is True
-                  and trailer.get("page_state") in {"traveling", "arrival_ready"}):
-                gate = {"state": "trailer_departed"}
-            elif (trailer.get("status") == "blocked" and trailer.get("reason") == "fatigue_recovery_required"
-                  and trailer.get("submitted") is True and trailer.get("departed") is False
-                  and trailer.get("page_state") == "fatigue_panel"):
-                # A confirmed fatigue panel does not prove that payment was rejected.
-                # Leave this submitted attempt for the user instead of spending again.
-                return _blocked_departure_result(
-                    reason="trailer_submission_requires_review", selected=selected,
-                    to_city_name=to_city_name, medicine_usage=medicine_usage, medicine_limit=medicine_limit,
-                    extra={"departure_attempts": departure_attempts + 1, "page_state": "fatigue_panel",
-                           "departure_gate": {"state": "fatigue_panel", "trailer_service": trailer,
-                                              "trailer_attempts": trailer_attempts}},
-                )
-            else:
-                return _blocked_departure_result(
-                    reason=str(trailer.get("reason") or "trailer_departure_unconfirmed"), selected=selected,
-                    to_city_name=to_city_name, medicine_usage=medicine_usage, medicine_limit=medicine_limit,
-                    extra={"departure_attempts": departure_attempts,
-                           "page_state": trailer.get("page_state") or "unknown",
-                           "departure_gate": {"state": "trailer_blocked", "trailer_service": trailer,
-                                              "trailer_attempts": trailer_attempts}},
-                )
-
-        if gate is None:
-            go_result = _wait_and_click_go_destination(
-                app=app, vision=vision, ocr=ocr, template_timeout_sec=3.0, interval_sec=0.5,
+        else:
+            return _blocked_departure_result(
+                reason=str(trailer.get("reason") or "trailer_departure_unconfirmed"), selected=selected,
+                to_city_name=to_city_name,
+                extra={"departure_attempts": 0,
+                       "page_state": trailer.get("page_state") or "unknown",
+                       "departure_gate": {"state": "trailer_blocked", "trailer_service": trailer,
+                                          "trailer_attempts": trailer_attempts}},
             )
-            if not go_result.get("clicked"):
-                _raise_error(
-                    code="go_destination_button_not_found",
-                    message="Unable to click 前往目的地 after selecting destination.",
-                    detail={"to_city_name": to_city_name, "selected": selected, "go_destination": go_result},
-                )
-            gate = _wait_departure_gate(app=app, ocr=ocr, vision=vision, timeout_sec=8.0, interval_sec=0.5)
-        departure_attempts += 1
-        if trailer_attempts:
-            gate.update(trailer_service=trailer_attempts[-1], trailer_attempts=list(trailer_attempts))
-        gate_state = str(gate.get("state") or "")
-        observe_operation("travel.departure_confirming", "出发判定结果", "progress",
-                          gate_state=gate_state, departure_attempts=departure_attempts,
-                          confirmed=gate_state == "trailer_departed")
-        if gate_state in {"confirm_clicked", "assume_traveling", "trailer_departed"}:
-            pickup_enabled = pickup_requested and (not pickup_on_trailer_only or gate_state == "trailer_departed")
-            observe_operation("travel.wait_arrival",
-                              "拖车出发已确认，等待到站" if gate_state == "trailer_departed" else "等待到站（出发未单独核实）",
-                              "started", gate_state=gate_state, departure_confirmed=gate_state == "trailer_departed")
-            arrival = resonance_pc_wait_intercity_arrival(
-                timeout_sec=enter_station_timeout_seconds,
-                interval_sec=3.0,
-                app=app,
-                ocr=ocr,
-                vision=vision,
-                **({"expect_passenger_settlement": True} if expect_passenger_settlement else {}),
-                **({"auto_escort": True} if auto_escort else {}),
-                **({"auto_pickup": True, "auto_pickup_interval_sec": pickup_interval}
-                   if pickup_enabled else {}),
-            )
-            observe_operation("travel.wait_arrival", "到站等待返回", "completed",
-                              arrival_status=arrival.get("status"),
-                              arrival_confirmed=arrival.get("success") is True,
-                              arrival_mode=arrival.get("arrival_mode"))
-            return {
-                "success": True,
-                "status": "ok",
-                "reason": None,
-                "to_city_name": selected.get("to_city_name"),
-                "to_city_key": selected.get("to_city_key"),
-                "selected_point": selected.get("selected_point"),
-                "mode": selected.get("mode"),
-                "attempts_used": selected.get("attempts_used"),
-                "departure_attempts": departure_attempts,
-                "departure_gate": gate,
-                "arrival_status": arrival.get("status"),
-                "encounter_actions": int(arrival.get("encounter_actions") or 0),
-                "arrival": arrival,
-                "fatigue_medicine_used": _merge_medicine_usage(medicine_usage),
-                "fatigue_medicine_use_count": sum(int(v) for v in medicine_usage.values()),
-                "fatigue_medicine_limit": medicine_limit,
-                **({"trailer_service": trailer_attempts[-1], "trailer_attempts": trailer_attempts,
-                    "travel_method": "trailer" if gate_state == "trailer_departed" else "normal"}
-                   if trailer_attempts else {}),
-            }
 
-        if gate_state != "fatigue_panel":
+    if gate is None:
+        go_result = _wait_and_click_go_destination(
+            app=app, vision=vision, ocr=ocr, template_timeout_sec=3.0, interval_sec=0.5,
+        )
+        if not go_result.get("clicked"):
             _raise_error(
-                code="departure_gate_unknown",
-                message="Unable to classify intercity departure state.",
-                detail={"to_city_name": to_city_name, "selected": selected, "gate": gate},
+                code="go_destination_button_not_found",
+                message="Unable to click 前往目的地 after selecting destination.",
+                detail={"to_city_name": to_city_name, "selected": selected, "go_destination": go_result},
             )
-
-        observe_operation("travel.fatigue_recovery", "处理疲劳恢复面板", "started")
-        if not bool(use_fatigue_medicine):
-            back = _click_fatigue_back(app=app, vision=vision, threshold=medicine_button_threshold)
-            _sleep_with_cancel(1.0)
-            return _blocked_departure_result(
-                reason="fatigue_recovery_required",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                back_result=back,
-                extra={"departure_attempts": departure_attempts, "departure_gate": gate},
-            )
-
-        if not allowed_names:
-            back = _click_fatigue_back(app=app, vision=vision, threshold=medicine_button_threshold)
-            _sleep_with_cancel(1.0)
-            return _blocked_departure_result(
-                reason="fatigue_medicine_not_allowed",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                back_result=back,
-                extra={"departure_attempts": departure_attempts, "departure_gate": gate},
-            )
-
-        if sum(int(v) for v in medicine_usage.values()) >= medicine_limit:
-            back = _click_fatigue_back(app=app, vision=vision, threshold=medicine_button_threshold)
-            _sleep_with_cancel(1.0)
-            return _blocked_departure_result(
-                reason="fatigue_medicine_limit_reached",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                back_result=back,
-                extra={"departure_attempts": departure_attempts, "departure_gate": gate},
-            )
-
-        medicine = _find_allowed_fatigue_medicine(
+        gate = _wait_departure_gate(app=app, ocr=ocr, vision=vision, timeout_sec=8.0, interval_sec=0.5)
+    departure_attempts = 1
+    if trailer_attempts:
+        gate.update(trailer_service=trailer_attempts[-1], trailer_attempts=list(trailer_attempts))
+    gate_state = str(gate.get("state") or "")
+    observe_operation("travel.departure_confirming", "出发判定结果", "progress",
+                      gate_state=gate_state, departure_attempts=departure_attempts,
+                      confirmed=gate_state == "trailer_departed")
+    if gate_state in {"confirm_clicked", "assume_traveling", "trailer_departed"}:
+        pickup_enabled = pickup_requested and (not pickup_on_trailer_only or gate_state == "trailer_departed")
+        observe_operation("travel.wait_arrival",
+                          "拖车出发已确认，等待到站" if gate_state == "trailer_departed" else "等待到站（出发未单独核实）",
+                          "started", gate_state=gate_state, departure_confirmed=gate_state == "trailer_departed")
+        arrival = resonance_pc_wait_intercity_arrival(
+            timeout_sec=enter_station_timeout_seconds,
+            interval_sec=3.0,
             app=app,
-            vision=vision,
-            allowed_names=allowed_names,
-            threshold=medicine_button_threshold,
-            excluded_names=ineffective_medicines,
-        )
-        if medicine is None:
-            back = _click_fatigue_back(app=app, vision=vision, threshold=medicine_button_threshold)
-            _sleep_with_cancel(1.0)
-            return _blocked_departure_result(
-                reason="fatigue_medicine_unavailable",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                back_result=back,
-                extra={"departure_attempts": departure_attempts, "departure_gate": gate},
-            )
-
-        medicine_name = str(medicine["name"])
-        match = medicine.get("match") if isinstance(medicine.get("match"), dict) else {}
-        if not _click_template_match(app, match):
-            ineffective_medicines.add(medicine_name)
-            continue
-        logger.info("[IntercityDeparture] selected fatigue medicine: %s", medicine_name)
-
-        _sleep_with_cancel(0.5)
-        confirm = _wait_and_click_fatigue_medicine_confirm(
-            app=app,
-            vision=vision,
             ocr=ocr,
-            threshold=medicine_button_threshold,
+            vision=vision,
+            **({"expect_passenger_settlement": True} if expect_passenger_settlement else {}),
+            **({"auto_escort": True} if auto_escort else {}),
+            **({"auto_pickup": True, "auto_pickup_interval_sec": pickup_interval}
+               if pickup_enabled else {}),
         )
-        if not confirm.get("clicked"):
-            back = _click_fatigue_back(app=app, vision=vision, threshold=medicine_button_threshold)
-            _sleep_with_cancel(1.0)
-            return _blocked_departure_result(
-                reason="fatigue_medicine_confirm_not_found",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                back_result=back,
-                extra={
-                    "departure_attempts": departure_attempts,
-                    "departure_gate": gate,
-                    "fatigue_medicine_name": medicine_name,
-                    "fatigue_medicine_confirm": confirm,
-                },
-            )
-        logger.info("[IntercityDeparture] confirmed fatigue medicine: %s", medicine_name)
+        observe_operation("travel.wait_arrival", "到站等待返回", "completed",
+                          arrival_status=arrival.get("status"),
+                          arrival_confirmed=arrival.get("success") is True,
+                          arrival_mode=arrival.get("arrival_mode"))
+        return {
+            "success": True,
+            "status": "ok",
+            "reason": None,
+            "to_city_name": selected.get("to_city_name"),
+            "to_city_key": selected.get("to_city_key"),
+            "selected_point": selected.get("selected_point"),
+            "mode": selected.get("mode"),
+            "attempts_used": selected.get("attempts_used"),
+            "departure_attempts": departure_attempts,
+            "departure_gate": gate,
+            "arrival_status": arrival.get("status"),
+            "encounter_actions": int(arrival.get("encounter_actions") or 0),
+            "arrival": arrival,
+            **({"trailer_service": trailer_attempts[-1], "trailer_attempts": trailer_attempts,
+                "travel_method": "trailer" if gate_state == "trailer_departed" else "normal"}
+               if trailer_attempts else {}),
+        }
 
-        # Confirming the default 1x use returns to the city main screen.
-        _sleep_with_cancel(1.5)
-        try:
-            main_ready = wait_depart_button(app=app, vision=vision, check_cancelled=_check_intercity_cancelled,
-                                            timeout_sec=5.0)
-        except DepartButtonError as exc:
-            _raise_error(exc.code, exc.message, exc.detail)
-        if not main_ready["confirmed"]:
-            return _blocked_departure_result(
-                reason="fatigue_medicine_return_to_city_failed",
-                selected=selected,
-                to_city_name=to_city_name,
-                medicine_usage=medicine_usage,
-                medicine_limit=medicine_limit,
-                extra={
-                    "departure_attempts": departure_attempts,
-                    "departure_gate": gate,
-                    "fatigue_medicine_name": medicine_name,
-                    "fatigue_medicine_confirm": confirm,
-                },
-            )
-        medicine_usage[medicine_name] = int(medicine_usage.get(medicine_name) or 0) + 1
-        ineffective_medicines.clear()
-        observe_operation("travel.fatigue_recovery", "恢复道具使用后已返回城市", "completed",
-                          medicine_name=medicine_name, main_confirmed=True,
-                          fatigue_medicine_used=_merge_medicine_usage(medicine_usage))
+    if gate_state != "fatigue_panel":
+        _raise_error(
+            code="departure_gate_unknown",
+            message="Unable to classify intercity departure state.",
+            detail={"to_city_name": to_city_name, "selected": selected, "gate": gate},
+        )
+
+    back = _click_fatigue_back(app=app, vision=vision)
+    try:
+        main_ready = wait_depart_button(app=app, vision=vision, check_cancelled=_check_intercity_cancelled,
+                                        timeout_sec=5.0)
+    except DepartButtonError as exc:
+        _raise_error(exc.code, exc.message, exc.detail)
+    return _blocked_departure_result(
+        reason="fatigue_recovery_required", selected=selected, to_city_name=to_city_name,
+        back_result=back, extra={"departure_attempts": departure_attempts, "departure_gate": gate,
+                                 "page_state": "city_main" if main_ready["confirmed"] else "unknown"},
+    )
 
 
 class _TravelPickup:

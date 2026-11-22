@@ -90,15 +90,19 @@ def test_profit_and_no_books_ignore_inactive_waste_limit():
         assert normalize_planning_inputs(request)["book_waste_limit"] == 0
 
 
-@pytest.mark.parametrize("water,bento", [(False, False), (False, True), (True, False), (True, True)])
-def test_recovery_threshold_projection_is_independent(water, bento):
+@pytest.mark.parametrize("water", [False, True])
+@pytest.mark.parametrize("bento", [False, True])
+@pytest.mark.parametrize("medicine", [False, True])
+def test_recovery_threshold_projection_is_independent(water, bento, medicine):
     from packages.resonance_shared.freight_parameters import FREIGHT_RECOVERY_THRESHOLD_KEYS
-    draft = dict(auto_sparkling_water=water, auto_bento=bento,
+    draft = dict(auto_sparkling_water=water, auto_bento=bento, use_fatigue_medicine=medicine,
                  sparkling_water_start_threshold=600, sparkling_water_stop_threshold=300,
-                 bento_start_threshold=700, bento_stop_threshold=200)
+                 bento_start_threshold=700, bento_stop_threshold=200,
+                 fatigue_medicine_start_threshold=500, fatigue_medicine_stop_threshold=100)
     projected = effective_freight_inputs(draft)
     for key in FREIGHT_RECOVERY_THRESHOLD_KEYS:
-        assert (key in projected) is (water if key.startswith("sparkling_water") else bento)
+        prefix = key.rsplit("_", 2)[0]
+        assert (key in projected) is {"sparkling_water": water, "bento": bento, "fatigue_medicine": medicine}[prefix]
         assert draft[key] is not None
 
 
@@ -111,3 +115,11 @@ def test_active_recovery_thresholds_are_strict_integers(start, stop):
             sparkling_water_start_threshold=start, sparkling_water_stop_threshold=stop))
     validate_freight_recovery_thresholds(dict(auto_sparkling_water=False,
         sparkling_water_start_threshold=start, sparkling_water_stop_threshold=stop))
+
+
+@pytest.mark.parametrize("limits", [{"gum": True}, {"cactus": -1}, {"gum": 1.5}, {"birch": 1}, []])
+def test_independent_medicine_limits_reject_unknown_items_and_invalid_counts(limits):
+    from packages.resonance_shared.freight_parameters import normalize_fatigue_medicine_limits
+
+    with pytest.raises(ValueError):
+        normalize_fatigue_medicine_limits(limits)

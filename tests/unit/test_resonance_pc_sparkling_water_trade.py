@@ -197,26 +197,25 @@ def water_operations(operations):
     return [op for op in operations if op.startswith("water:")]
 
 
-def test_water_runs_at_each_eligible_arrival_and_updates_observed_fatigue_and_quota(harness):
+def test_water_runs_after_trade_using_current_fatigue_and_quota(harness):
     operations, state = harness
     result = run_harness(harness, sparkling_water_start_threshold=250)
     assert result["success"] is True
-    assert water_operations(operations) == ["water:海角城:3", "water:岚心城:2"]
-    assert state["local_quota"] == 1 and state["current_fatigue"] == 200
-    assert operations.index("travel:0") < operations.index("water:海角城:3") < operations.index("trade:1")
-    assert operations.index("travel:1") < operations.index("water:岚心城:2") < operations.index("final_sale")
-    assert result["sparkling_water"]["completed_count"] == 5
-    assert result["sparkling_water"]["recovered_fatigue"] == 250
+    assert water_operations(operations) == ["water:海角城:3"]
+    assert state["local_quota"] == 3 and state["current_fatigue"] == 300
+    assert operations.index("travel:0") < operations.index("trade:1") < operations.index("water:海角城:3") < operations.index("travel:1")
+    assert result["sparkling_water"]["completed_count"] == 3
+    assert result["sparkling_water"]["recovered_fatigue"] == 150
     assert result["sparkling_water_plan"]["mode"] == "thresholds"
-    assert len(result["sparkling_water_plan"]["visits"]) == 2
+    assert len(result["sparkling_water_plan"]["visits"]) == 1
 
 
-def test_initial_fatigue_above_start_drinks_before_first_trade(harness):
+def test_initial_fatigue_above_start_drinks_after_first_trade(harness):
     operations, state = harness
     state.update(current_fatigue=401, travel_costs=[0, 0])
     result = run_harness(harness)
     assert water_operations(operations) == ["water:岚心城:5"]
-    assert operations.index("water:岚心城:5") < operations.index("trade:0")
+    assert operations.index("trade:0") < operations.index("water:岚心城:5") < operations.index("travel:0")
     assert state["current_fatigue"] == 151 and result["final_fatigue"] == 151
 
 
@@ -246,14 +245,13 @@ def test_below_start_at_final_city_does_not_force_any_drink(harness):
     assert result["sparkling_water"]["status"] == "skipped"
 
 
-def test_final_sale_crossing_start_runs_threshold_recovery_after_sale(harness):
+def test_final_sale_crossing_start_only_updates_measured_fatigue(harness):
     operations, state = harness
     state.update(current_fatigue=100, travel_costs=[0, 0], trade_costs=[0, 0, 250])
     result = run_harness(harness)
-    assert result["success"] and result["final_fatigue"] == 200
-    assert operations.index("final_sale") < operations.index("water:岚心城:3")
-    assert any(row["phase"] == "final_sale" and row["initial_fatigue"] == 350
-               for row in result["recovery_events"])
+    assert result["success"] and result["final_fatigue"] == 350
+    assert "final_sale" in operations and water_operations(operations) == []
+    assert all(row["phase"] == "pre_departure" for row in result["recovery_events"])
 
 
 def test_disabled_recovery_ignores_snapshot_and_does_not_refresh(harness):
@@ -293,7 +291,7 @@ def test_water_failure_does_not_retry_or_continue_trade(harness):
     result = run_harness(harness)
     assert result["success"] is False
     assert water_operations(operations) == ["water:岚心城:5"]
-    assert "trade:0" not in operations and "final_sale" not in operations
+    assert "travel:0" not in operations and "final_sale" not in operations
 
 
 def test_actual_local_quota_overrides_stale_snapshot(harness):

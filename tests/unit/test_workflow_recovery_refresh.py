@@ -494,8 +494,7 @@ def test_old_medicine_setting_does_not_opt_in_to_sparkling_water(window):
     saved = window._settings.load_trade_inputs()
     assert saved["auto_sparkling_water"] is False
     assert saved["use_fatigue_medicine"] is True
-    assert saved["allowed_fatigue_medicines"] == ["old medicine"]
-    assert saved["fatigue_medicine_max_uses"] == 4
+    assert saved["fatigue_medicine_limits"] == {"lollipop": 0, "gum": 0, "cactus": 0}
 
 
 @pytest.mark.parametrize("entry", ["full"])

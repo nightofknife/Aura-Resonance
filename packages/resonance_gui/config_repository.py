@@ -23,7 +23,8 @@ from .affix_catalog import normalize_affix_inputs
 from .battle_plan import normalize_battle_editor_inputs
 from packages.resonance_shared.passenger_parameters import DEFAULT_PASSENGER_OPTIONS, normalize_passenger_options
 from packages.resonance_shared.freight_parameters import (
-    DEFAULT_RECOVERY_THRESHOLDS, validate_book_limit_per_stop,
+    DEFAULT_RECOVERY_THRESHOLDS, FREIGHT_RECOVERY_THRESHOLD_KEYS, normalize_fatigue_medicine_limits,
+    validate_book_limit_per_stop,
 )
 from packages.resonance_shared.market_proxy import normalize_market_proxy, validate_market_source
 
@@ -123,8 +124,7 @@ DEFAULT_TRADE_INPUTS: dict[str, Any] = {
     "trailer_daily_first_n": 1,
     "trailer_payment": "gold",
     "use_fatigue_medicine": False,
-    "allowed_fatigue_medicines": [],
-    "fatigue_medicine_max_uses": 4,
+    "fatigue_medicine_limits": normalize_fatigue_medicine_limits(None),
     "arrival_timeout_seconds": 3600,
     "auto_cape_island_investment": True,
     "auto_trade_goods_investment": False,
@@ -530,7 +530,6 @@ def _merge_trade_inputs(values: dict[str, Any]) -> dict[str, Any]:
     for key, minimum, maximum in (("fatigue_budget", 0, None), ("cargo_capacity", 1, None),
                                   ("book_waste_limit", 0, None),
                                   ("negotiation_max_attempts", 1, 6),
-                                  ("fatigue_medicine_max_uses", 0, None),
                                   ("arrival_timeout_seconds", 1, None)):
         value = merged[key]
         if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
@@ -590,8 +589,8 @@ def _merge_trade_inputs(values: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("便当类型顺序至少选择一种，只允许工作餐和爱心便当，且不能重复。")
     merged["bento_priority"] = list(priority)
-    for key in ("sparkling_water_start_threshold", "sparkling_water_stop_threshold",
-                "bento_start_threshold", "bento_stop_threshold"):
+    merged["fatigue_medicine_limits"] = normalize_fatigue_medicine_limits(merged["fatigue_medicine_limits"])
+    for key in FREIGHT_RECOVERY_THRESHOLD_KEYS:
         value = merged[key]
         if value is not None and (type(value) is not int or not 0 <= value <= 2147483647):
             raise ValueError(f"{key} 必须为非负整数或未设置，不能使用布尔或小数。")

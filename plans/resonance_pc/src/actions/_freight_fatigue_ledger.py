@@ -1,6 +1,6 @@
 """Keep observed freight fatigue separate from confirmed route additions.
 
-Only completed normal travel has a predictable addition. Negotiation is already
+Completed normal and trailer travel have the same predictable addition. Negotiation is already
 included in the trade-page observation and must never be added here again.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from typing import Any
 
 
 class FreightFatigueLedger:
-    OBSERVATION_SOURCES = frozenset({"trade_page", "profile", "water", "bento"})
+    OBSERVATION_SOURCES = frozenset({"trade_page", "profile", "water", "bento", "medicine"})
 
     def __init__(self):
         self.current_fatigue: int | None = None
@@ -88,12 +88,7 @@ class FreightFatigueLedger:
             self.invalidate("travel_encounter_actions")
             return None
         method = travel.get("travel_method", "normal")
-        trailer = travel.get("trailer_service")
-        if method == "trailer" or (isinstance(trailer, dict) and (
-                trailer.get("departed") is True or trailer.get("status") == "departed")):
-            self.invalidate("travel_trailer_used")
-            return None
-        if method != "normal":
+        if method not in ("normal", "trailer"):
             self.invalidate("travel_method_unknown")
             return None
         if not self._nonnegative_int(cost):

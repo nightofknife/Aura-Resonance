@@ -309,8 +309,8 @@ def test_route_child_failure_disables_departure(monkeypatch):
     with pytest.raises(trade.CityTradeFlowError) as exc:
         asyncio.run(trade._execute_trade_leg(
             index=1, leg={"from_city": "远星大桥", "to_city": "海角城", "buy_products": []},
-            sell_raise_to_cap=False, page_state="city_panel", use_fatigue_medicine=False,
-            allowed_fatigue_medicines=[], fatigue_medicine_max_uses=1, negotiation_max_attempts=8,
+            sell_raise_to_cap=False, page_state="city_panel",
+            negotiation_max_attempts=8,
             app=object(), ocr=object(), vision=object(), city_shop_data=object(),
             auto_cape_island_investment=False, auto_rubbish_recycling=False,
             auto_trade_goods_investment=True, context=object(), engine=object(),
@@ -333,8 +333,8 @@ def test_route_first_station_excluded_and_repeat_visits_included(monkeypatch, in
     context, engine = object(), object()
     result = asyncio.run(trade._execute_trade_leg(
         index=index, leg={"from_city": city, "to_city": "海角城", "buy_products": []},
-        sell_raise_to_cap=False, page_state="city_panel", use_fatigue_medicine=False,
-        allowed_fatigue_medicines=[], fatigue_medicine_max_uses=1, negotiation_max_attempts=8,
+        sell_raise_to_cap=False, page_state="city_panel",
+        negotiation_max_attempts=8,
         app=object(), ocr=object(), vision=object(), city_shop_data=object(),
         auto_cape_island_investment=False, auto_rubbish_recycling=False,
         auto_trade_goods_investment=True, trade_goods_investment_mode=14, context=context, engine=engine,
@@ -347,7 +347,7 @@ def test_route_first_station_excluded_and_repeat_visits_included(monkeypatch, in
     assert received[0]["context"] is context and received[0]["engine"] is engine
 
 
-def test_endpoint_runs_child_after_water_before_final_sale(harness, monkeypatch, task_engine):
+def test_endpoint_runs_child_before_final_sale_without_arrival_water(harness, monkeypatch, task_engine):
     operations, route_state = harness
     route_state.update(current_fatigue=200, travel_costs=[150])
     monkeypatch.setattr(trade, "resonance_pc_trade_plan_optimal_route",
@@ -362,13 +362,12 @@ def test_endpoint_runs_child_after_water_before_final_sale(harness, monkeypatch,
 
     engine.orchestrator.execute_task = record_task
     result = run_full(auto_trade_goods_investment=True, context=context, engine=engine)
-    assert operations.index("travel:0") < operations.index("water:海角城:3")
-    assert operations.index("water:海角城:3") < operations.index("goods_investment") < operations.index("final_sale")
-    assert [op for op in operations if op.startswith("water:")] == ["water:海角城:3"]
+    assert operations.index("travel:0") < operations.index("goods_investment") < operations.index("final_sale")
+    assert not any(op.startswith("water:") for op in operations)
     assert operations.count("exchange") == 1
     assert len(state["calls"]) == 1
     assert state["calls"][0]["inputs"] == {"mode": 10, "city_name": "海角城"}
-    assert route_state["current_fatigue"] == 200 and route_state["local_quota"] == 3
+    assert route_state["current_fatigue"] == 350 and route_state["local_quota"] == 6
     assert result["final_sale"]["trade_goods_investment"]["status"] == "invested"
 
 
@@ -381,8 +380,8 @@ def test_endpoint_child_failure_prevents_final_sale(harness, monkeypatch, task_e
     install_exchange(monkeypatch, operations)
     state["result"] = business_result(page_state="investment_page")
     result = run_full(auto_trade_goods_investment=True, context=context, engine=engine)
-    assert "water:海角城:3" in operations
-    assert operations.index("travel:0") < operations.index("water:海角城:3") < operations.index("exchange")
+    assert not any(op.startswith("water:") for op in operations)
+    assert operations.index("travel:0") < operations.index("exchange")
     assert len(state["calls"]) == 1
     assert state["calls"][0]["inputs"] == {"mode": 10, "city_name": "海角城"}
     assert "final_sale" not in operations

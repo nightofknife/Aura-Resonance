@@ -195,6 +195,7 @@ TRADE_STAGE_LABELS = {
     "rubbish_recycling": "倒垃圾",
     "sparkling_water": "喝气泡水",
     "bento": "吃便当",
+    "fatigue_medicine": "使用疲劳药",
     "final_sale": "终点清仓",
     "route": "执行路线",
     "task": "任务",
@@ -212,6 +213,7 @@ FREIGHT_PHASE_LABELS = {
     "travel": "前往下一城市",
     "final_sale": "终点清仓",
     "bento": "吃便当",
+    "fatigue_medicine": "使用疲劳药",
     "sparkling_water": "喝气泡水",
     "city_trade": "城市交易",
     "books": "使用进货书",
@@ -341,7 +343,7 @@ def _update_progress_display(state: Any, payload: Mapping[str, Any], data: Mappi
     timestamp = timestamp if isinstance(timestamp, str) and timestamp.strip() else None
     stage = str(payload.get("stage") or "task")
     identity = (stage, payload.get("city_index"), payload.get("leg_index"), payload.get("trip_index"))
-    if stage in {"sparkling_water", "bento"} and data.get("scope") and data.get("phase"):
+    if stage in {"sparkling_water", "bento", "fatigue_medicine"} and data.get("scope") and data.get("phase"):
         identity += (data["scope"], data["phase"])
     if identity != state._stage_identity:
         state.stage_started_at = timestamp

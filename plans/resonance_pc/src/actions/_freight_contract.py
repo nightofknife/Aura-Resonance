@@ -137,6 +137,7 @@ def fixed_start_stop(request: dict[str, Any]) -> dict[str, Any]:
 
 def plan_view(plan: dict[str, Any], request: dict[str, Any], *, kind: str,
               auto_bento: bool = False, water_plan: dict[str, Any] | None = None,
+              auto_medicine: bool = False,
               investment: bool = False, rubbish: bool = False,
               auto_passenger: bool = False) -> dict[str, Any]:
     result = deepcopy(plan)
@@ -187,9 +188,6 @@ def plan_view(plan: dict[str, Any], request: dict[str, Any], *, kind: str,
             if not threshold_recovery:
                 phase("sparkling_water", bool(water_plan and water_plan.get("planned")
                                              and water_plan.get("city_index") == index))
-        if threshold_recovery:
-            phase("sparkling_water", bool(water_plan.get("enabled")), "disabled")
-            phase("bento", auto_bento, "disabled")
         phase("sell" if following else "final_sale", True)
         if following:
             books_reason = ("book_budget_exhausted" if following.get("buy_products")
@@ -200,6 +198,10 @@ def plan_view(plan: dict[str, Any], request: dict[str, Any], *, kind: str,
             phase("books", bool(following.get("books_used")), books_reason)
             phase("buy", bool(following.get("buy_products")),
                   following.get("selection_reason") or "no_goods_planned")
+            if threshold_recovery:
+                phase("sparkling_water", bool(water_plan.get("enabled")), "disabled")
+                phase("bento", auto_bento, "disabled")
+                phase("fatigue_medicine", auto_medicine, "disabled")
             if auto_passenger:
                 phase("passenger_recruit", True)
             phase("travel", True)

@@ -1409,14 +1409,18 @@ exports:
       type: Any
       required: false
       default: null
-    - name: allowed_fatigue_medicines
+    - name: fatigue_medicine_limits
       type: Any
       required: false
       default: null
-    - name: fatigue_medicine_max_uses
+    - name: fatigue_medicine_start_threshold
       type: Any
       required: false
-      default: 4
+      default: 600
+    - name: fatigue_medicine_stop_threshold
+      type: Any
+      required: false
+      default: 100
     - name: arrival_timeout_seconds
       type: Any
       required: false
@@ -1659,22 +1663,6 @@ exports:
       type: Any
       required: false
       default: 0.5
-    - name: use_fatigue_medicine
-      type: Any
-      required: false
-      default: false
-    - name: allowed_fatigue_medicines
-      type: Any
-      required: false
-      default: null
-    - name: fatigue_medicine_max_uses
-      type: Any
-      required: false
-      default: 4
-    - name: medicine_button_threshold
-      type: Any
-      required: false
-      default: 0.95
     - name: from_city_name
       type: Any
       required: false
@@ -3822,4 +3810,4 @@ exports:
     domain: 整顿中心
 metadata:
   generated_by: ManifestGenerator
-  generated_at: '2026-11-22T12:37:01Z'
+  generated_at: '2026-11-22T13:02:39Z'

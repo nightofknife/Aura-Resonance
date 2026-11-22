@@ -1,4 +1,4 @@
-"""Offline integration for template entry and post-medicine main readiness."""
+"""Offline integration for template entry and fatigue-panel exit readiness."""
 import asyncio
 from hashlib import sha256
 import json
@@ -26,9 +26,8 @@ def flow(monkeypatch):
     monkeypatch.setattr(m, "resonance_pc_wait_intercity_arrival", lambda **kwargs:
                         {"status": "arrived", "encounter_actions": 0})
     monkeypatch.setattr(m, "_wait_for_marker_hit", lambda **kwargs: pytest.fail("No entry/main OCR allowed"))
-    monkeypatch.setattr(m, "_find_allowed_fatigue_medicine", lambda **kwargs:
-        {"name": "\u63d0\u795e\u68d2\u68d2\u7cd6", "match": {"found": True, "center": [600, 350]}})
-    monkeypatch.setattr(m, "_wait_and_click_fatigue_medicine_confirm", lambda **kwargs: {"clicked": True})
+    monkeypatch.setattr(m, "_click_fatigue_back", lambda **kwargs: events.append("fatigue_back") or {"clicked": True})
+    monkeypatch.setattr(m, "wait_depart_button", lambda **kwargs: {"confirmed": True})
     app = SimpleNamespace(click=lambda **kwargs: clicks.append(kwargs),
                           get_window_size=lambda: (1280, 720))
     return SimpleNamespace(events=events, clicks=clicks, app=app)
@@ -47,46 +46,38 @@ def test_normal_route_keeps_map_selection_without_entry_ocr(flow, monkeypatch):
 
 
 @pytest.mark.parametrize("ready", [True, False])
-def test_medicine_return_uses_shared_template_and_never_fullscreen_ocr(flow, monkeypatch, ready):
-    gates = iter(["fatigue_panel", "confirm_clicked"])
-    monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": next(gates)})
-    def confirm(**kwargs):
+def test_fatigue_popup_only_returns_and_reports_blocked(flow, monkeypatch, ready):
+    monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "fatigue_panel"})
+    def confirm(*args, **kwargs):
         assert kwargs["timeout_sec"] == 5.0
         flow.events.append("main_template")
         return {"confirmed": ready}
     monkeypatch.setattr(m, "wait_depart_button", confirm)
-    result = run(flow, use_fatigue_medicine=True,
-                 allowed_fatigue_medicines=["\u63d0\u795e\u68d2\u68d2\u7cd6"])
-    assert flow.clicks == [{"x": 600, "y": 350}]
-    assert flow.events[:3] == ["open_map", ("select", "栖羽站", "海角城"), "main_template"]
-    if ready:
-        assert flow.events[3:] == ["open_map", ("select", "栖羽站", "海角城")]
-        assert result["success"] is True and result["fatigue_medicine_use_count"] == 1
-    else:
-        assert result["status"] == "blocked" and result["reason"] == "fatigue_medicine_return_to_city_failed"
-        assert len(flow.events) == 3
+    result = run(flow)
+    assert not flow.clicks
+    assert flow.events == ["open_map", ("select", "栖羽站", "海角城"), "fatigue_back", "main_template"]
+    assert result["status"] == "blocked" and result["reason"] == "fatigue_recovery_required"
+    assert result["page_state"] == ("city_main" if ready else "unknown")
 
 
-def test_medicine_template_failure_blocks_departure(flow, monkeypatch):
+def test_fatigue_exit_template_failure_blocks_departure(flow, monkeypatch):
     monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "fatigue_panel"})
-    def confirm(**kwargs):
+    def confirm(*args, **kwargs):
         raise DepartButtonError("depart_capture_failed", "capture failed")
     monkeypatch.setattr(m, "wait_depart_button", confirm)
     with pytest.raises(m.IntercityDestinationError) as error:
-        run(flow, use_fatigue_medicine=True,
-            allowed_fatigue_medicines=["\u63d0\u795e\u68d2\u68d2\u7cd6"])
+        run(flow)
     assert error.value.code == "depart_capture_failed"
     assert flow.events.count("open_map") == 1
 
 
-def test_medicine_readiness_propagates_cancellation(flow, monkeypatch):
+def test_fatigue_exit_readiness_propagates_cancellation(flow, monkeypatch):
     monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "fatigue_panel"})
-    def confirm(**kwargs):
+    def confirm(*args, **kwargs):
         raise asyncio.CancelledError()
     monkeypatch.setattr(m, "wait_depart_button", confirm)
     with pytest.raises(asyncio.CancelledError):
-        run(flow, use_fatigue_medicine=True,
-            allowed_fatigue_medicines=["\u63d0\u795e\u68d2\u68d2\u7cd6"])
+        run(flow)
     assert flow.events.count("open_map") == 1
 
 
