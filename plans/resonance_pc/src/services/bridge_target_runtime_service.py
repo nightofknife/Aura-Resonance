@@ -6,7 +6,7 @@ import win32gui
 
 from packages.aura_core.api import service_info
 from packages.aura_core.context.plan import current_plan_name
-from packages.aura_core.observability.runtime_trace import activity, current_root_cid
+from packages.aura_core.observability.runtime_trace import activity, current_root_cid, log_event
 from packages.aura_core.scheduler.operation_scope import target_operation_guard
 
 from ....aura_base.src.platform.contracts import TargetRuntimeError
@@ -48,6 +48,7 @@ class ResonancePcTargetRuntimeService(TargetRuntimeService):
                     raise TargetRuntimeError("capture_rect_invalid", "Capture rect is outside the current window client area.",
                                              {"rect": [x, y, width, height], "viewport": [0, 0, w, h]})
             requested_at = time.monotonic()
+            initial = stream.diagnostic_snapshot()
             generation = -1
             while time.monotonic() - requested_at < 1.0:
                 with target_operation_guard(self):
@@ -62,7 +63,24 @@ class ResonancePcTargetRuntimeService(TargetRuntimeService):
                     image = capture.image[y:y + height, x:x + width].copy()
                     return replace(capture, image=image, relative_rect=(x, y, width, height))
                 time.sleep(.005)
-            raise TargetRuntimeError("bridge_capture_timeout", "Unity did not publish a fresh frame within one second")
+            latest = stream.diagnostic_snapshot()
+            before, after = initial.get("generation"), latest.get("generation")
+            details = {
+                "stream_id": stream.session_id,
+                "wait_ms": round((time.monotonic() - requested_at) * 1000, 1),
+                "frame_generation_start": before,
+                "frame_generation_end": after,
+                "frame_generation_changed": before != after if before is not None and after is not None else None,
+                "last_unity_frame": latest.get("last_unity_frame"),
+                "last_frame_age_ms": latest.get("last_frame_age_ms"),
+                "native_capture_attempts_start": initial.get("native_capture_attempts"),
+                "native_capture_attempts_end": latest.get("native_capture_attempts"),
+                "last_native_capture_ms": latest.get("last_native_capture_ms"),
+                "native_capture_in_progress_ms": latest.get("native_capture_in_progress_ms"),
+            }
+            log_event("capture.bridge_timeout", **details)
+            raise TargetRuntimeError("bridge_capture_timeout", "Unity did not publish a fresh frame within one second",
+                                     details)
 
     def get_client_rect(self):
         if not self._use_bridge:

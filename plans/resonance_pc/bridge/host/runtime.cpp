@@ -486,7 +486,8 @@ void Runtime::begin(const std::shared_ptr<Command> &c) {
   if (op_ == "stream_start") {
     if (!capabilities_.value("frame_stream", false))
       throw Error("bridge_capture_unsupported", "This Unity profile has no frame-end capture");
-    frame_stream_.open(c->request.at("session"), owner_pid_, width_, height_);
+    frame_stream_.open(c->request.at("session"), owner_pid_, width_, height_,
+                       a.value("frame_diagnostics", false));
     stage_ = 99;
     return;
   }

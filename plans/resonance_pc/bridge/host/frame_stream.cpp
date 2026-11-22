@@ -15,6 +15,52 @@ struct Header {
 };
 static_assert(sizeof(Header) == 40);
 
+// Optional trailer, separate from the legacy header and pixels. Only the frame
+// callback writes it. An even sequence brackets a consistent lock-free snapshot.
+struct DiagnosticTrailer {
+  volatile LONG64 sequence;
+  uint64_t attempts, started_qpc, finished_qpc, duration_qpc;
+  uint64_t generation, frame_qpc, unity_frame;
+};
+static_assert(sizeof(DiagnosticTrailer) == 64);
+static_assert((sizeof(Header) + kBytes) % alignof(DiagnosticTrailer) == 0);
+constexpr size_t kFrameMappingSize = sizeof(Header) + kBytes;
+
+struct CaptureTiming {
+  DiagnosticTrailer *trailer;
+  uint64_t started;
+
+  CaptureTiming(DiagnosticTrailer *trailer, uint64_t started) : trailer(trailer), started(started) {
+    if (!trailer)
+      return;
+    InterlockedIncrement64(&trailer->sequence);
+    ++trailer->attempts;
+    trailer->started_qpc = started;
+    InterlockedIncrement64(&trailer->sequence);
+  }
+
+  void frame_published(const Header &header) {
+    if (!trailer)
+      return;
+    InterlockedIncrement64(&trailer->sequence);
+    trailer->generation = header.generation;
+    trailer->frame_qpc = header.captured_qpc;
+    trailer->unity_frame = header.unity_frame;
+    InterlockedIncrement64(&trailer->sequence);
+  }
+
+  ~CaptureTiming() {
+    if (!trailer)
+      return;
+    LARGE_INTEGER ended{};
+    QueryPerformanceCounter(&ended);
+    InterlockedIncrement64(&trailer->sequence);
+    trailer->finished_qpc = uint64_t(ended.QuadPart);
+    trailer->duration_qpc = trailer->finished_qpc - started;
+    InterlockedIncrement64(&trailer->sequence);
+  }
+};
+
 struct TryLock {
   HANDLE mutex;
   DWORD result = WaitForSingleObject(mutex, 0);
@@ -38,7 +84,8 @@ struct Texture {
 };
 } // namespace
 
-void FrameStream::open(const std::string &session, DWORD client_pid, int width, int height) {
+void FrameStream::open(const std::string &session, DWORD client_pid, int width, int height,
+                       bool diagnostics) {
   if (enabled())
     return;
   if (width != kWidth || height != kHeight)
@@ -57,13 +104,20 @@ void FrameStream::open(const std::string &session, DWORD client_pid, int width, 
   mapping_ = OpenFileMappingW(FILE_MAP_WRITE, FALSE, name.c_str());
   mutex_ = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, (name + L"-lock").c_str());
   if (mapping_ && mutex_)
-    view_ = MapViewOfFile(mapping_, FILE_MAP_WRITE, 0, 0, sizeof(Header) + kBytes);
+    view_ = MapViewOfFile(mapping_, FILE_MAP_WRITE, 0, 0,
+                          kFrameMappingSize + (diagnostics ? sizeof(DiagnosticTrailer) : 0));
   if (!view_) {
     close();
     throw Error("bridge_capture_mapping", "Cannot open the owner's frame buffer");
   }
   width_ = width;
   height_ = height;
+  diagnostics_ = diagnostics;
+  if (diagnostics_) {
+    auto trailer = reinterpret_cast<DiagnosticTrailer *>(static_cast<char *>(view_) + kFrameMappingSize);
+    ZeroMemory(trailer, sizeof(*trailer));
+    InterlockedExchange64(&trailer->sequence, 2);
+  }
 }
 
 void FrameStream::close() {
@@ -76,6 +130,7 @@ void FrameStream::close() {
   view_ = nullptr;
   mapping_ = mutex_ = nullptr;
   generation_ = next_capture_ = error_ = 0;
+  diagnostics_ = false;
 }
 
 void FrameStream::publish(uint64_t frame, HWND window) {
@@ -101,6 +156,9 @@ void FrameStream::publish(uint64_t frame, HWND window) {
       return;
     }
   }
+  auto trailer = diagnostics_ ?
+      reinterpret_cast<DiagnosticTrailer *>(static_cast<char *>(view_) + kFrameMappingSize) : nullptr;
+  CaptureTiming timing{trailer, uint64_t(now.QuadPart)};
   try {
     DWORD pid{};
     GetWindowThreadProcessId(window, &pid);
@@ -128,6 +186,7 @@ void FrameStream::publish(uint64_t frame, HWND window) {
       memcpy(header + 1, il.data(pixels.get()), kBytes);
       *header = {kReady, kWidth, kHeight, uint32_t(kBytes), ++generation_,
                  uint64_t(now.QuadPart), frame};
+      timing.frame_published(*header);
     } else if (lock.result == WAIT_ABANDONED) {
       error_ = kCaptureFailed;
     }

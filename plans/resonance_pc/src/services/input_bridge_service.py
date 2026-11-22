@@ -446,7 +446,8 @@ class ResonancePcInputBridgeService:
                 stale_ms = resolve_runtime_config(self.config).capture.max_stale_ms
                 stream = BridgeFrameStream(self._client.session, max_stale_ms=stale_ms)
                 try:
-                    self._client.request("stream_start", viewport=self._viewport, timeout=2)
+                    self._client.request("stream_start", {"frame_diagnostics": True},
+                                         viewport=self._viewport, timeout=2)
                 except BaseException:
                     stream.close()
                     raise

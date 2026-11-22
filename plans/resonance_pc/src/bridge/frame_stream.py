@@ -18,6 +18,9 @@ BACKEND = "unity_bridge"
 WIDTH, HEIGHT = 1280, 720
 _HEADER = struct.Struct("<IIIIQQQ")
 _PIXEL_BYTES = WIDTH * HEIGHT * 4
+_FRAME_BYTES = _HEADER.size + _PIXEL_BYTES
+_DIAGNOSTIC_TRAILER = struct.Struct("<8Q")
+_DIAGNOSTIC_SEQUENCE = struct.Struct("<Q")
 
 
 class BridgeFrameStream:
@@ -39,7 +42,7 @@ class BridgeFrameStream:
         name = f"Local\\AuraResonanceFrame-{os.getpid()}-{session}"
         self._mutex = win32event.CreateMutex(None, False, name + "-lock")
         try:
-            self._buffer = mmap.mmap(-1, _HEADER.size + _PIXEL_BYTES, tagname=name)
+            self._buffer = mmap.mmap(-1, _FRAME_BYTES + _DIAGNOSTIC_TRAILER.size, tagname=name)
         except BaseException:
             self._mutex.Close()
             raise
@@ -84,7 +87,7 @@ class BridgeFrameStream:
                 timestamp = self._clock_origin + tick / self._frequency
                 if time.monotonic() - timestamp > self._max_age:
                     return None
-                pixels = self._buffer[_HEADER.size:]
+                pixels = self._buffer[_HEADER.size:_FRAME_BYTES]
             finally:
                 win32event.ReleaseMutex(self._mutex)
         finally:
@@ -94,3 +97,52 @@ class BridgeFrameStream:
         return {"capture": CaptureResult(True, rgb, client_rect, client_rect, BACKEND),
                 "generation": generation, "arrived_at_monotonic": timestamp,
                 "session_id": self.session_id, "unity_frame": unity_frame}
+
+    def diagnostic_snapshot(self) -> dict:
+        """Sample counters and timing without copying pixels or waiting on the writer."""
+        if not self._lock.acquire(blocking=False):
+            return {}
+        try:
+            if self._closed:
+                return {}
+            for _ in range(3):
+                values = _DIAGNOSTIC_TRAILER.unpack_from(self._buffer, _FRAME_BYTES)
+                sequence, attempts, started, finished, duration, generation, frame_tick, unity_frame = values
+                if sequence == 0:
+                    return self._legacy_diagnostic_snapshot()
+                confirmed, = _DIAGNOSTIC_SEQUENCE.unpack_from(self._buffer, _FRAME_BYTES)
+                if sequence == confirmed and sequence % 2 == 0:
+                    now = self._query_clock()
+                    return {
+                        "generation": generation,
+                        "last_unity_frame": unity_frame if generation else None,
+                        "last_frame_age_ms": self._elapsed_ms(now - frame_tick) if frame_tick else None,
+                        "native_capture_attempts": attempts,
+                        "last_native_capture_ms": self._elapsed_ms(duration) if finished else None,
+                        "native_capture_in_progress_ms": self._elapsed_ms(now - started) if started > finished else None,
+                    }
+            return {}
+        finally:
+            self._lock.release()
+
+    def _legacy_diagnostic_snapshot(self) -> dict:
+        acquired = win32event.WaitForSingleObject(self._mutex, 0)
+        if acquired != win32event.WAIT_OBJECT_0:
+            if acquired == win32event.WAIT_ABANDONED:
+                win32event.ReleaseMutex(self._mutex)
+            return {}
+        try:
+            _, _, _, _, generation, frame_tick, unity_frame = _HEADER.unpack_from(self._buffer)
+        finally:
+            win32event.ReleaseMutex(self._mutex)
+        return {"generation": generation, "last_unity_frame": unity_frame if generation else None,
+                "last_frame_age_ms": self._elapsed_ms(self._query_clock() - frame_tick) if frame_tick else None}
+
+    @staticmethod
+    def _query_clock() -> int:
+        tick = ctypes.c_int64()
+        ctypes.windll.kernel32.QueryPerformanceCounter(ctypes.byref(tick))
+        return tick.value
+
+    def _elapsed_ms(self, ticks: int) -> float:
+        return round(max(0, ticks) * 1000 / self._frequency, 3)

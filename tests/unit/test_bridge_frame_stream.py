@@ -13,10 +13,12 @@ from plans.aura_base.src.platform.contracts import TargetRuntimeError
 from plans.resonance_pc.src.actions.runtime_preflight_pc_actions import resonance_pc_require_client_resolution
 from plans.resonance_pc.src.actions._deep_dive_four_view_reader import source_key
 from plans.resonance_pc.src.actions._deep_dive_frame_source import stream_metadata
-from plans.resonance_pc.src.bridge.frame_stream import BACKEND, BridgeFrameStream, HEIGHT, WIDTH, _HEADER, _PIXEL_BYTES
+from plans.resonance_pc.src.bridge.frame_stream import (
+    BACKEND, BridgeFrameStream, HEIGHT, WIDTH, _DIAGNOSTIC_TRAILER, _FRAME_BYTES, _HEADER, _PIXEL_BYTES,
+)
 from plans.resonance_pc.src.services.bridge_target_runtime_service import ResonancePcTargetRuntimeService
 from plans.resonance_pc.src.services.bridge_app_service import ResonancePcAppService
-from plans.resonance_pc.src.services import input_bridge_service
+from plans.resonance_pc.src.services import bridge_target_runtime_service, input_bridge_service
 from plans.resonance_pc.src.services.input_bridge_service import ResonancePcInputBridgeService
 
 
@@ -35,8 +37,65 @@ def publish(stream, generation, *, age=0., state=1):
     pixels = np.zeros((HEIGHT, WIDTH, 4), dtype=np.uint8)
     pixels[-1, 17] = (2, 7, 11, 99)
     stream._buffer[:_HEADER.size] = _HEADER.pack(state, WIDTH, HEIGHT, _PIXEL_BYTES, generation, tick, 100)
-    stream._buffer[_HEADER.size:] = pixels.tobytes()
+    stream._buffer[_HEADER.size:_FRAME_BYTES] = pixels.tobytes()
 
+
+def test_diagnostic_snapshot_reads_native_timing_and_legacy_frame_age(stream, monkeypatch):
+    publish(stream, 1)
+    legacy = stream.diagnostic_snapshot()
+    assert legacy["generation"] == 1 and legacy["last_unity_frame"] == 100
+    assert 0 <= legacy["last_frame_age_ms"] < 250
+    assert "last_native_capture_ms" not in legacy
+
+    now = 10 * stream._frequency
+    monkeypatch.setattr(stream, "_query_clock", lambda: now)
+    ticks = stream._frequency // 1000
+    _DIAGNOSTIC_TRAILER.pack_into(
+        stream._buffer, _FRAME_BYTES, 4, 3, now - 410*ticks, now - 500*ticks,
+        290*ticks, 2, now - 790*ticks, 101,
+    )
+    assert stream.diagnostic_snapshot() == {
+        "generation": 2, "last_unity_frame": 101, "last_frame_age_ms": 790.0,
+        "native_capture_attempts": 3, "last_native_capture_ms": 290.0,
+        "native_capture_in_progress_ms": 410.0,
+    }
+    assert stream.capture_stream_frame()["generation"] == 1
+    # An odd sequence means the writer has not finished its metadata update.
+    _DIAGNOSTIC_TRAILER.pack_into(stream._buffer, _FRAME_BYTES, 5, 0, 0, 0, 0, 0, 0, 0)
+    assert stream.diagnostic_snapshot() == {}
+
+
+def test_capture_timeout_logs_changed_generation_even_if_new_frame_was_stale(stream, monkeypatch):
+    config = {"resonance_pc.input.mode": "bridge"}
+    monkeypatch.delenv("AURA_GUI_INPUT_BRIDGE", raising=False)
+    bridge = ResonancePcInputBridgeService(config=config)
+    runtime = ResonancePcTargetRuntimeService(config, bridge)
+    bridge._viewport = {"width": WIDTH, "height": HEIGHT}
+    bridge._frame_stream = stream
+    bridge._session_root_cid = "-"
+    events = []
+    monkeypatch.setattr(bridge_target_runtime_service, "log_event", lambda event, **data: events.append((event, data)))
+    raw_poll = stream.capture_stream_frame
+    publish(stream, 4, age=2)
+
+    def offer_stale_frame(*args, **kwargs):
+        publish(stream, 5, age=2)
+        return raw_poll(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "capture_stream_frame", offer_stale_frame)
+    token = current_plan_name.set("resonance_pc")
+    try:
+        with pytest.raises(TargetRuntimeError) as error:
+            runtime.capture((30, 470, 540, 180))
+    finally:
+        current_plan_name.reset(token)
+    assert error.value.code == "bridge_capture_timeout"
+    assert events == [("capture.bridge_timeout", error.value.detail)]
+    detail = error.value.detail
+    assert detail["frame_generation_start"] == 4 and detail["frame_generation_end"] == 5
+    assert detail["frame_generation_changed"] is True
+    assert detail["last_frame_age_ms"] > 250
+    assert detail["last_native_capture_ms"] is None
 
 def test_poll_is_atomic_and_rejects_old_or_replaced_frames(stream):
     publish(stream, 1, age=2)
