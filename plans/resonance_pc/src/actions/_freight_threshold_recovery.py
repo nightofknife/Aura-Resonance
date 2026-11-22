@@ -5,6 +5,8 @@ from copy import deepcopy
 from asyncio import CancelledError
 from typing import Any
 
+from packages.resonance_shared.freight_parameters import FATIGUE_MEDICINES, normalize_fatigue_medicine_limits
+
 from ._freight_recovery_policy import plan_threshold_water_use, validate_recovery_thresholds
 from ._freight_fatigue_ledger import FreightFatigueLedger
 
@@ -18,13 +20,18 @@ class RecoveryStopError(RuntimeError):
 class FreightRecoverySession:
     def __init__(self, *, water_enabled, bento_enabled, water_start, water_stop,
                  bento_start, bento_stop, priority, refresh_fatigue, water_counts,
-                 has_rest, drink_water, consume_bentos, emit=None, travel_cost=None):
+                 has_rest, drink_water, consume_bentos, emit=None, travel_cost=None,
+                 medicine_enabled=False, medicine_start=600, medicine_stop=100,
+                 medicine_limits=None, consume_medicine=None,
+                 require_trade_reading=False):
         if type(water_enabled) is not bool or type(bento_enabled) is not bool:
             raise ValueError("Recovery switches must be booleans")
         if water_enabled:
             validate_recovery_thresholds(water_start, water_stop, resource="sparkling_water")
         if bento_enabled:
             validate_recovery_thresholds(bento_start, bento_stop, resource="bento")
+        if medicine_enabled:
+            validate_recovery_thresholds(medicine_start, medicine_stop, resource="fatigue_medicine")
         self.water_enabled, self.bento_enabled = water_enabled, bento_enabled
         self.water_start, self.water_stop = water_start, water_stop
         self.bento_start, self.bento_stop = bento_start, bento_stop
@@ -37,6 +44,12 @@ class FreightRecoverySession:
         self.final_fatigue: int | None = None
         self.ledger = FreightFatigueLedger()
         self.travel_cost = travel_cost
+        self.medicine_enabled = medicine_enabled
+        self.medicine_start, self.medicine_stop = medicine_start, medicine_stop
+        self.medicine_limits = normalize_fatigue_medicine_limits(medicine_limits)
+        self.consume_medicine = consume_medicine
+        self.medicine_usage: dict[str, int] = {}
+        self.require_trade_reading = require_trade_reading
 
     def invalidate_fatigue(self):
         """An unmeasured operation makes the preceding reading historical."""
@@ -83,7 +96,7 @@ class FreightRecoverySession:
 
     @property
     def enabled(self):
-        return self.water_enabled or self.bento_enabled
+        return self.water_enabled or self.bento_enabled or self.medicine_enabled
 
     async def _emit(self, stage, state, event, **data):
         if self.emit is not None:
@@ -217,6 +230,44 @@ class FreightRecoverySession:
                              reason=event["bento_consumption"]["reason"])
         return page_state
 
+    async def _check_medicine(self, event, page_state):
+        current = self.ledger.current_fatigue
+        remaining = {key: count - self.medicine_usage.get(key, 0)
+                     for key, count in self.medicine_limits.items()}
+        reason = None
+        if not any(self.medicine_limits.values()):
+            reason = "fatigue_medicine_not_allowed"
+        elif not any(remaining.values()):
+            reason = "fatigue_medicine_limit_reached"
+        elif current <= self.medicine_start:
+            reason = "below_start_threshold"
+        if reason is not None:
+            event["fatigue_medicine"] = self._skip(reason, page_state, current)
+            await self._emit("fatigue_medicine", "skipped", event, reason=reason)
+            return page_state
+
+        event["fatigue_medicine"] = {"success": False, "triggered": True, "status": "running"}
+        await self._emit("fatigue_medicine", "started", event, current_fatigue=current)
+        self.invalidate_fatigue()
+        result = await self.consume_medicine(current=current, start=self.medicine_start,
+                                             stop=self.medicine_stop, limits=remaining,
+                                             page_state=page_state)
+        event["fatigue_medicine"] = {**result, "triggered": True}
+        for item in result["items"]:
+            if item["confirmed"]:
+                key = item["medicine_id"]
+                self.medicine_usage[key] = self.medicine_usage.get(key, 0) + item["count"]
+        final = result.get("final_fatigue")
+        if result.get("success") is not True or not self._observed(final) or result.get("page_state") != "city_main":
+            raise RecoveryStopError(result.get("reason") or "fatigue_medicine_failed", event)
+        self._set_observed(final, "medicine")
+        state = "completed" if result["items"] else "skipped"
+        await self._emit("fatigue_medicine", state, event, reason=result.get("reason"),
+                         result={**result, "recovered_fatigue": sum(
+                             item["before"] - item["after"] for item in result["items"] if item["confirmed"]
+                         )})
+        return "city_main"
+
     async def check(self, *, city_name, city_index, page_state, scope="route", phase="arrival",
                     rest_stop=None):
         """A rest callback may share one visit with unrelated local shopping."""
@@ -231,6 +282,15 @@ class FreightRecoverySession:
                 self.invalidate_fatigue()
                 raise RecoveryStopError("recovery_invalid_start_page", event)
             current = self.ledger.current_fatigue
+            if self.require_trade_reading and self.ledger.source != "trade_page":
+                event.update(success=True, status="skipped", page_state=page_state,
+                             reason="trade_fatigue_unrecognized")
+                self._track_event(event)
+                for stage, enabled in (("sparkling_water", self.water_enabled), ("bento", self.bento_enabled),
+                                       ("fatigue_medicine", self.medicine_enabled)):
+                    if enabled:
+                        await self._emit(stage, "skipped", event, reason=event["reason"])
+                return {"page_state": page_state, "recovery": event}
             if current is None:
                 current = await self.refresh_fatigue(page_state)
                 page_state = "city_main"
@@ -248,6 +308,10 @@ class FreightRecoverySession:
                     rest, page_state = await self._check_water(event, page_state, rest_stop)
                 else:
                     page_state = await self._check_bento(event, page_state)
+            if self.medicine_enabled:
+                stage = "fatigue_medicine"
+                event["checked_order"].append(stage)
+                page_state = await self._check_medicine(event, page_state)
             event.update(success=True, page_state=page_state)
             self._track_event(event)
             return {**rest, "page_state": page_state, "recovery": event}
@@ -255,7 +319,7 @@ class FreightRecoverySession:
             self._track_event(event)
             event.update(success=False, reason=getattr(exc, "code", "recovery_cancelled" if isinstance(exc, CancelledError) else "recovery_execution_failed"),
                          page_state="unknown")
-            resource = event.get("bento_consumption" if stage == "bento" else "sparkling_water")
+            resource = event.get("bento_consumption" if stage == "bento" else stage)
             if resource is not None and resource.get("triggered"):
                 detail = getattr(exc, "detail", {})
                 if isinstance(detail, dict) and detail is not event:
@@ -299,10 +363,15 @@ class FreightRecoverySession:
             result["final_fatigue"] = rows[-1].get("final_fatigue") if rows else None
             return result
 
-        return {"recovery_events": deepcopy(self.events),
+        result = {"recovery_events": deepcopy(self.events),
                 "sparkling_water": summarize("sparkling_water", self.water_enabled),
                 "bento_consumption": summarize("bento_consumption", self.bento_enabled),
                 "final_fatigue": self.final_fatigue,
                 "estimated_fatigue": (self.ledger.current_fatigue
                                       if self.ledger.source == "route_derived" else None),
                 "fatigue_tracking": self.ledger.snapshot()}
+        if self.medicine_enabled:
+            result.update(fatigue_medicine_used=[{"name": FATIGUE_MEDICINES[key], "count": count}
+                                                for key, count in self.medicine_usage.items()],
+                          fatigue_medicine_use_count=sum(self.medicine_usage.values()))
+        return result

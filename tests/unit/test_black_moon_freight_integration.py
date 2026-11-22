@@ -297,8 +297,7 @@ def route_harness(monkeypatch):
     monkeypatch.setattr(flow, "_execute_freight_rest_stop", rest)
     monkeypatch.setattr(flow.asyncio, "sleep", sleep)
     kwargs = dict(route=[{"from_city": "A", "to_city": "B"}, {"from_city": "B", "to_city": "C"}],
-        start_page_state="city_main", use_fatigue_medicine=False,
-        allowed_fatigue_medicines=[], fatigue_medicine_max_uses=0,
+        start_page_state="city_main",
         app=object(), ocr=object(), vision=object(), city_shop_data=object(), state_store=object(),
         auto_rubbish_recycling=False, auto_black_moon_local_purchase=True,
         black_moon_purchase_table=dict(TABLE), black_moon_catalog=CATALOG)

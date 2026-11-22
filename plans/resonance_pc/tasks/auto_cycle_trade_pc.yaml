@@ -354,15 +354,24 @@ auto_cycle_trade_pc:
         type: boolean
         required: false
         default: false
-      - name: allowed_fatigue_medicines
-        type: list
+      - name: fatigue_medicine_limits
+        type: dict
         required: false
-        default: []
-      - name: fatigue_medicine_max_uses
+        default: {}
+        properties:
+          lollipop: {name: lollipop, type: number, required: false, strict_integer: true, min: 0, max: 100000}
+          gum: {name: gum, type: number, required: false, strict_integer: true, min: 0, max: 100000}
+          cactus: {name: cactus, type: number, required: false, strict_integer: true, min: 0, max: 100000}
+      - name: fatigue_medicine_start_threshold
         type: number
         strict_integer: true
         required: false
-        default: 4
+        default: 600
+      - name: fatigue_medicine_stop_threshold
+        type: number
+        strict_integer: true
+        required: false
+        default: 100
       - name: arrival_timeout_seconds
         type: number
         required: false
@@ -1554,8 +1563,9 @@ auto_cycle_trade_pc:
         city_tax_rates_bps: "{{ inputs.city_tax_rates_bps | default({}) }}"
         product_unlocks: "{{ inputs.product_unlocks | default({'mode': 'all', 'product_ids': []}) }}"
         use_fatigue_medicine: "{{ inputs.use_fatigue_medicine | default(false) }}"
-        allowed_fatigue_medicines: "{{ inputs.allowed_fatigue_medicines | default([]) }}"
-        fatigue_medicine_max_uses: "{{ inputs.fatigue_medicine_max_uses | default(4) }}"
+        fatigue_medicine_limits: "{{ inputs.fatigue_medicine_limits | default({}) }}"
+        fatigue_medicine_start_threshold: "{{ inputs.fatigue_medicine_start_threshold | default(600) }}"
+        fatigue_medicine_stop_threshold: "{{ inputs.fatigue_medicine_stop_threshold | default(100) }}"
         arrival_timeout_seconds: "{{ inputs.arrival_timeout_seconds | default(3600) }}"
         auto_cape_island_investment: "{{ inputs.auto_cape_island_investment | default(true) }}"
         auto_trade_goods_investment: "{{ inputs.auto_trade_goods_investment | default(false) }}"

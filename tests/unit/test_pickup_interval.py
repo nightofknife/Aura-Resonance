@@ -161,8 +161,8 @@ def test_leg_passes_interval_to_departure(monkeypatch):
     with pytest.raises(RuntimeError, match="fake departure boundary"):
         asyncio.run(trade._execute_trade_leg(
             index=0, leg={"from_city": "A", "to_city": "B"}, sell_raise_to_cap=False,
-            page_state="city_panel", use_fatigue_medicine=False, allowed_fatigue_medicines=[],
-            fatigue_medicine_max_uses=4, negotiation_max_attempts=5,
+            page_state="city_panel",
+            negotiation_max_attempts=5,
             auto_pickup=True, auto_pickup_interval_sec=3.25,
             app=object(), ocr=object(), vision=object(), city_shop_data=object()))
     assert captured[0]["auto_pickup_interval_sec"] == 3.25

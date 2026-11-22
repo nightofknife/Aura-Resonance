@@ -1,4 +1,4 @@
-"""Towing wraps existing destination/medicine/arrival flow without double departure."""
+"""Towing wraps existing destination/arrival flow without double departure."""
 
 import asyncio
 
@@ -100,26 +100,21 @@ def test_disabled_never_calls_towing_operation(flow, monkeypatch):
     assert "trailer_service" not in result
 
 
-def test_quota_skip_stays_disabled_during_same_leg_medicine_retry(flow, monkeypatch):
+def test_quota_skip_and_ordinary_fatigue_popup_stop_without_retry(flow, monkeypatch):
     calls = setup(monkeypatch, flow, skip())
-    gates = iter(["fatigue_panel", "confirm_clicked"])
-    monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": next(gates)})
-    monkeypatch.setattr(m, "wait_depart_button", lambda **kwargs: {"confirmed": True})
-    result = run(flow, use_trailer=True, use_fatigue_medicine=True, allowed_fatigue_medicines=["提神棒棒糖"])
-    assert result["success"] and result["travel_method"] == "normal" and len(calls) == 1
-    assert flow.events.count("normal_go") == 2 and result["fatigue_medicine_use_count"] == 1
+    monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "fatigue_panel"})
+    result = run(flow, use_trailer=True)
+    assert result["status"] == "blocked" and result["reason"] == "fatigue_recovery_required"
+    assert len(calls) == 1 and flow.events.count("normal_go") == 1
 
 
-@pytest.mark.parametrize("use_medicine", [False, True])
-def test_submitted_towing_fatigue_never_recovers_and_repeats_payment(flow, monkeypatch, use_medicine):
+def test_submitted_towing_fatigue_never_repeats_payment(flow, monkeypatch):
     calls = setup(monkeypatch, flow, {"success": False, "status": "blocked", "submitted": True,
                 "departed": False, "reason": "fatigue_recovery_required", "page_state": "fatigue_panel"})
-    monkeypatch.setattr(m, "_find_allowed_fatigue_medicine", lambda **kwargs: pytest.fail("Uncertain payment"))
-    result = run(flow, use_trailer=True, use_fatigue_medicine=use_medicine,
-                 allowed_fatigue_medicines=["提神棒棒糖"])
+    result = run(flow, use_trailer=True)
     assert not result["success"] and result["reason"] == "trailer_submission_requires_review"
     assert result["page_state"] == "fatigue_panel" and len(calls) == 1
-    assert len(result["trailer_attempts"]) == 1 and result["fatigue_medicine_use_count"] == 0
+    assert len(result["trailer_attempts"]) == 1
     assert "normal_go" not in flow.events and not flow.clicks
 
 

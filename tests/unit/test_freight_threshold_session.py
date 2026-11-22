@@ -545,8 +545,7 @@ def test_predeparture_recovery_failure_keeps_confirmed_trade_and_book_usage(monk
     result = asyncio.run(trade._execute_route(
         route=[{"from_city": "A", "to_city": "B", "from_city_id": "1", "to_city_id": "2",
                 "buy_products": ["goods"], "books_used": 2}],
-        start_page_state="city_panel", use_fatigue_medicine=False,
-        allowed_fatigue_medicines=[], fatigue_medicine_max_uses=0,
+        start_page_state="city_panel",
         app=object(), ocr=object(), vision=object(), city_shop_data=object(),
         state_store=object(), recovery_session=Session()))
     assert result["status"] == "failed"
@@ -674,7 +673,7 @@ def test_invalidation_clears_current_fatigue_but_keeps_observation_history():
     assert session.events[0]["final_fatigue"] == 600
 
 
-def test_reposition_arrival_recovery_failure_keeps_confirmed_travel_and_trailer_receipt(monkeypatch):
+def test_reposition_keeps_travel_and_trailer_receipt_without_recovery(monkeypatch):
     from plans.resonance_pc.src.actions import city_trade_flow_pc_actions as trade
     monkeypatch.setattr(trade, "_check_trade_cancelled", lambda: None)
     travel = {"success": True, "status": "completed", "page_state": "city_main",
@@ -690,10 +689,7 @@ def test_reposition_arrival_recovery_failure_keeps_confirmed_travel_and_trailer_
             assert result == travel and cost == 100
             calls.append("observe_travel")
         async def check(self, **kwargs):
-            calls.append(kwargs["phase"])
-            if kwargs["phase"] == "arrival":
-                raise RecoveryStopError("recovery_fatigue_invalid", {})
-            return {"page_state": "city_main"}
+            pytest.fail("Reposition must not trigger recovery")
     class Trailer:
         daily_first_n = 1
         payment = "gold"
@@ -704,6 +700,8 @@ def test_reposition_arrival_recovery_failure_keeps_confirmed_travel_and_trailer_
             assert scope == "reposition" and index == 0 and result == travel
             calls.append("trailer_receipt")
     async def tracked(function, **kwargs):
+        if function is trade.resonance_pc_open_city_panel_from_main:
+            return {"success": True, "page_state": "city_panel", "city": {"city_name": "B"}}
         assert function is trade.resonance_pc_intercity_depart_and_wait
         assert kwargs["use_trailer"] is True
         calls.append("travel")
@@ -712,14 +710,9 @@ def test_reposition_arrival_recovery_failure_keeps_confirmed_travel_and_trailer_
     leg = {"from_city": "A", "to_city": "B", "from_city_id": "1", "to_city_id": "2"}
     result = asyncio.run(trade._execute_freight_reposition(
         [leg], page_state="city_main", app=object(), ocr=object(), vision=object(),
-        arrival_timeout_seconds=30, use_fatigue_medicine=False,
-        allowed_fatigue_medicines=[], fatigue_medicine_max_uses=0,
+        arrival_timeout_seconds=30,
         trailer_plan=Trailer(), recovery_session=Session()))
-    assert calls[0] == "pre_departure" and calls[-1] == "arrival"
-    assert calls.index("begin_travel") < calls.index("travel")
-    assert calls.index("travel") < calls.index("trailer_receipt") < calls.index("arrival")
-    assert calls.index("travel") < calls.index("observe_travel") < calls.index("arrival")
-    assert result["success"] is False
-    assert result["reason"] == "recovery_fatigue_invalid"
+    assert calls == ["begin_travel", "travel", "observe_travel", "trailer_receipt"]
+    assert result["success"] is True
     assert result["leg_results"] == [{"leg": leg, "travel": travel}]
-    assert result["page_state"] == "unknown"
+    assert result["page_state"] == "city_panel"
