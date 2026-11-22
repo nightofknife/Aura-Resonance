@@ -31,7 +31,7 @@ from ....aura_base.src.platform.contracts import TargetRuntimeError
 from ....aura_base.src.services._target_identity import read_target_identity
 from ._bounded_observation import ObservationBudget, wait_for_observation
 from ._recognition_failure import with_template_failure
-from ._template_observation import observe_template
+from ._template_observation import capture_template_frame, observe_template
 from ._navigation_templates import GLOBAL_BACK, GLOBAL_CITY_MAIN
 from ._cancellable_wait import async_sleep_slices, sleep_slices
 
@@ -696,6 +696,48 @@ def _wait_settlement_template(app, vision, template, region, *, threshold, timeo
     return last
 
 
+def _wait_settlement_exit(app, vision, cfg, *, threshold, budget, allow_retry):
+    settlement_region = _coerce_region(cfg["region"])
+    menu_region = _coerce_region(_SHOP_MENU_READY_REGION)
+    regions = (settlement_region, menu_region)
+    left = min(x for x, _, _, _ in regions)
+    top = min(y for _, y, _, _ in regions)
+    right = max(x + width for x, _, width, _ in regions)
+    bottom = max(y + height for _, y, _, height in regions)
+    plan_root = Path(__file__).resolve().parents[2]
+
+    def observe():
+        frame = capture_template_frame(
+            app=app, region=(left, top, right - left, bottom - top),
+            check_cancelled=_check_trade_cancelled,
+        )
+
+        def match(template, region, threshold):
+            x, y, width, height = region
+            crop = {**frame, "region": region}
+            if frame["valid"]:
+                crop["image"] = frame["image"][y - top:y - top + height, x - left:x - left + width]
+            return observe_template(
+                app=app, vision=vision, template=plan_root / template, region=region,
+                threshold=threshold, check_cancelled=_check_trade_cancelled, frame=crop,
+            )
+
+        settlement = match(cfg["template"], settlement_region, threshold)
+        if settlement["valid"] and not settlement["found"]:
+            settlement["shop_menu"] = match(_SHOP_MENU_READY_TEMPLATE, menu_region, _SHOP_MENU_READY_THRESHOLD)
+        return settlement
+
+    result = wait_for_observation(
+        observe=observe,
+        accept=lambda value: (allow_retry and value["found"] is True)
+        or value.get("shop_menu", {}).get("found") is True,
+        budget=budget, poll_seconds=0.3, sleep=_sleep_with_cancel,
+    )
+    if result.matched or (result.in_time and result.value["found"] is True):
+        return result.value
+    return {"valid": False, "found": None, "reason": "shop_menu_not_confirmed" if result.in_time
+            else "observation_timeout", "last_match": result.value}
+
 
 def _close_settlement(
     app: Any,
@@ -753,15 +795,8 @@ def _close_settlement(
         app.click(x=_SETTLEMENT_EXIT_POINT[0], y=_SETTLEMENT_EXIT_POINT[1])
         _sleep_with_cancel(0.8)
         recheck_budget = ObservationBudget(1.5, monotonic=time.monotonic, check_cancelled=_check_trade_cancelled)
-        recheck = _wait_settlement_template(
-            app,
-            vision,
-            str(cfg["template"]),
-            list(cfg["region"]),
-            threshold=threshold,
-            timeout_sec=1.5,
-            interval_sec=0.3,
-            _budget=recheck_budget,
+        recheck = _wait_settlement_exit(
+            app, vision, cfg, threshold=threshold, budget=recheck_budget, allow_retry=True,
         )
         logger.info(
             "[TradeSettlement] phase=after_first_exit kind=%s still_visible=%s match=%s context=%s",
@@ -781,40 +816,14 @@ def _close_settlement(
                 _sleep_with_cancel(0.8)
                 final_budget = ObservationBudget(1.5, monotonic=time.monotonic,
                                                  check_cancelled=_check_trade_cancelled)
-                try:
-                    final_match = observe_template(
-                        app=app, vision=vision,
-                        template=Path(__file__).resolve().parents[2] / str(cfg["template"]),
-                        region=_coerce_region(cfg["region"]), threshold=threshold,
-                        check_cancelled=_check_trade_cancelled,
-                    )
-                    if not final_budget.active():
-                        final_match = {"valid": False, "found": None,
-                                       "reason": "observation_timeout", "last_match": final_match}
-                except CityTradeFlowError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - unknown evidence cannot authorize closure
-                    final_match = {
-                        "found": None,
-                        "template": str(cfg["template"]),
-                        "region": list(cfg["region"]),
-                        "reason": "diagnostic_match_failed",
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                    }
-                    logger.warning(
-                        "[TradeSettlement] phase=after_second_exit_diagnostic_failed kind=%s error_type=%s message=%s context=%s",
-                        kind, type(exc).__name__, exc, dict(_WORKER_PROGRESS_CONTEXT.get()),
-                    )
-                else:
-                    log_method = logger.warning if final_match.get("found") else logger.info
-                    log_method(
-                        "[TradeSettlement] phase=after_second_exit kind=%s still_visible=%s match=%s context=%s",
-                        kind, bool(final_match.get("found")), final_match, dict(_WORKER_PROGRESS_CONTEXT.get()),
-                    )
-        final_absence_verified = bool(
-            final_match.get("valid") is True and final_match.get("found") is False
-        )
+                final_match = _wait_settlement_exit(
+                    app, vision, cfg, threshold=threshold, budget=final_budget, allow_retry=False,
+                )
+                logger.info(
+                    "[TradeSettlement] phase=after_second_exit kind=%s still_visible=%s match=%s context=%s",
+                    kind, bool(final_match.get("found")), final_match, dict(_WORKER_PROGRESS_CONTEXT.get()),
+                )
+        final_absence_verified = final_match.get("shop_menu", {}).get("found") is True
         if not final_absence_verified:
             logger.warning(
                 "[TradeSettlement] phase=completed kind=%s reported_closed=false final_absence_verified=false retried=%s final_match=%s context=%s",

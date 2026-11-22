@@ -176,22 +176,43 @@ def test_cancel_while_closing_retains_positive_transaction_evidence(monkeypatch,
     assert buy_rig.names().count("click") == 1
 
 
-@pytest.mark.parametrize("first_recheck_visible", [False, True])
-def test_settlement_closure_requires_a_valid_absent_frame(monkeypatch, first_recheck_visible):
-    now, clicks, matches = [0.0], [], [0]
+@pytest.mark.parametrize("kind", ["buy", "sell"])
+@pytest.mark.parametrize(
+    ("exit_frames", "closed", "expected_clicks", "expected_captures"),
+    [
+        (["shop"], True, 1, 2),
+        (["transition", "shop"], True, 1, 3),
+        (["settlement", "transition", "shop"], True, 2, 4),
+        (["transition"], False, 1, None),
+    ],
+)
+def test_settlement_exit_waits_for_shop_and_retries_only_a_visible_report(
+        monkeypatch, kind, exit_frames, closed, expected_clicks, expected_captures):
+    now, clicks, captures = [0.0], [], []
+
+    def capture(rect):
+        captures.append(rect)
+        return NS(success=True, image=np.zeros((rect[3], rect[2], 3), dtype=np.uint8))
+
     def match(**kwargs):
-        matches[0] += 1
-        found = matches[0] == 1 or (first_recheck_visible and matches[0] == 2)
+        scene = "settlement" if not clicks else exit_frames[min(len(captures) - 2, len(exit_frames) - 1)]
+        is_shop = kwargs["template_image"].endswith("menu_ready.png")
+        found = (scene == "shop" and is_shop) or (scene == "settlement" and not is_shop)
         return NS(found=found, confidence=.99 if found else .1)
+
     monkeypatch.setattr(trade, "time", NS(monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0]+seconds)))
     monkeypatch.setattr(trade, "is_current_task_cancel_requested", lambda: False)
     result = trade._close_settlement(
-        NS(capture=lambda rect: NS(success=True, image=np.zeros((rect[3], rect[2], 3), dtype=np.uint8)),
-           click=lambda **kwargs: clicks.append(kwargs)), NS(find_template=match), "buy",
+        NS(capture=capture, click=lambda **kwargs: clicks.append(kwargs)), NS(find_template=match), kind,
     )
-    assert result["closed"] is True and result["settlement_confirmed"] is True
-    assert result["final_absence_verified"] is True
-    assert len(clicks) == (2 if first_recheck_visible else 1)
+    assert result["settlement_confirmed"] is True
+    assert result["closed"] is result["final_absence_verified"] is closed
+    assert len(clicks) == expected_clicks
+    if expected_captures is not None:
+        assert len(captures) == expected_captures
+        assert result["final_match"]["shop_menu"]["found"] is True
+    else:
+        assert result["observation_unknown"] is True
 
 
 def test_passenger_does_not_dismiss_again_after_positive_absence(monkeypatch):
