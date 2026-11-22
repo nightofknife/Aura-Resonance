@@ -78,12 +78,7 @@ def harness(monkeypatch):
         if state.get("final_sale_failure") and terminal:
             return {"success": False, "page_state": "unknown"}
         state["current_fatigue"] += state["trade_costs"][index] if index < len(state["trade_costs"]) else 0
-        observation = {"success": True, "current_fatigue": state["current_fatigue"],
-                       "max_fatigue": 1000, "source": "trade_page", "reason": None}
-        overrides = state.get("trade_observations", {})
-        if index in overrides:
-            observation = deepcopy(overrides[index])
-        return {"success": True, "page_state": "city_main", "fatigue_observation": observation}
+        return {"success": True, "page_state": "city_main"}
 
     def travel(**kwargs):
         index = state["travel_index"]
@@ -91,10 +86,14 @@ def harness(monkeypatch):
         operations.append(f"travel:{index}")
         blocked = state.get("block_index") == index
         failed = state.get("fail_index") == index
+        observation = {"success": True, "current_fatigue": state["current_fatigue"],
+                       "max_fatigue": 1000, "source": "departure_map", "reason": "stable"}
+        observation = deepcopy(state.get("departure_observations", {}).get(index, observation))
         if not blocked and not failed:
             state["current_fatigue"] += state["travel_costs"][index] if index < len(state["travel_costs"]) else 100
         return {"status": "blocked" if blocked else "failed" if failed else "ok",
                 "success": not (blocked or failed), "page_state": "city_main",
+                **({"departure_fatigue": observation} if kwargs.get("capture_departure_fatigue") else {}),
                 **deepcopy(state.get("travel_results", {}).get(index, {}))}
 
     async def drink(**kwargs):
@@ -216,7 +215,7 @@ def test_initial_fatigue_above_start_drinks_after_first_trade(harness):
     result = run_harness(harness)
     assert water_operations(operations) == ["water:岚心城:5"]
     assert operations.index("trade:0") < operations.index("water:岚心城:5") < operations.index("travel:0")
-    assert state["current_fatigue"] == 151 and result["final_fatigue"] == 151
+    assert state["current_fatigue"] == 151 and result["sparkling_water"]["final_fatigue"] == 151
 
 
 def test_start_equality_does_not_drink_or_force_terminal_consumption(harness):
@@ -226,7 +225,7 @@ def test_start_equality_does_not_drink_or_force_terminal_consumption(harness):
     assert water_operations(operations) == []
     assert result["sparkling_water"]["triggered"] is False
     assert "final_sale" in operations
-    assert result["final_fatigue"] == 300
+    assert result["final_fatigue"] is None
 
 
 def test_trade_cost_crossing_start_is_checked_before_departure(harness):
@@ -245,11 +244,12 @@ def test_below_start_at_final_city_does_not_force_any_drink(harness):
     assert result["sparkling_water"]["status"] == "skipped"
 
 
-def test_final_sale_crossing_start_only_updates_measured_fatigue(harness):
+def test_final_sale_crossing_start_does_not_open_profile(harness):
     operations, state = harness
     state.update(current_fatigue=100, travel_costs=[0, 0], trade_costs=[0, 0, 250])
     result = run_harness(harness)
-    assert result["success"] and result["final_fatigue"] == 350
+    assert result["success"] and result["final_fatigue"] is None
+    assert operations.count("refresh_fatigue") == 1
     assert "final_sale" in operations and water_operations(operations) == []
     assert all(row["phase"] == "pre_departure" for row in result["recovery_events"])
 

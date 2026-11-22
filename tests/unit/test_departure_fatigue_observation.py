@@ -1,4 +1,4 @@
-"""Trade fatigue uses split digit OCR on a fresh frame and stable pair evidence."""
+"""Departure fatigue uses split digit OCR on fresh HUD frames."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ import pytest
 
 from packages.aura_core.scheduler.operation_scope import OperationTimeout
 from packages.aura_core.utils.exceptions import StopTaskException
-from plans.resonance_pc.src.actions import _trade_fatigue_observation as reader
+from plans.resonance_pc.src.actions import _departure_fatigue_observation as reader
 
 
 FIXTURES = Path(__file__).parents[1] / 'fixtures' / 'fatigue_observation'
@@ -60,7 +60,7 @@ def result(text, confidence=0.99, **kwargs):
 def read(readings, fixture='buy', **kwargs):
     app = App(readings, fixture)
     ocr = Ocr(app)
-    return reader.read_trade_fatigue(app, ocr, poll_seconds=0, **kwargs), app, ocr
+    return reader.read_departure_fatigue(app, ocr, poll_seconds=0, **kwargs), app, ocr
 
 
 @pytest.mark.parametrize('fixture', ['buy', 'sell'])
@@ -69,12 +69,12 @@ def read(readings, fixture='buy', **kwargs):
 def test_two_matching_fresh_roi_reads_split_both_numbers(fixture, pair):
     observed, app, ocr = read([pair, pair], fixture=fixture)
     assert observed == {'success': True, 'current_fatigue': int(pair[0]), 'max_fatigue': int(pair[1]),
-                        'reason': 'stable', 'source': 'trade_page', 'attempts': 2}
-    assert app.calls == [reader.TRADE_FATIGUE_ROI] * 2
+                        'reason': 'stable', 'source': 'departure_map', 'attempts': 2}
+    assert app.calls == [reader.DEPARTURE_FATIGUE_ROI] * 2
     assert len(ocr.calls) == 4
     # The real HUD crop goes through the shared geometric splitter. Neither OCR
     # input contains the whole ratio, and each side is from the same capture.
-    assert all(image.shape[1] < 3 * reader.TRADE_FATIGUE_ROI[2] for image in ocr.calls)
+    assert all(image.shape[1] < 3 * reader.DEPARTURE_FATIGUE_ROI[2] for image in ocr.calls)
     assert all(image.size for image in ocr.calls)
     assert (ocr.calls[0] == ocr.calls[2]).all()
     assert (ocr.calls[1] == ocr.calls[3]).all()
@@ -131,7 +131,7 @@ def test_capture_failure_is_unknown_without_ocr():
     app = App()
     ocr = Ocr(app)
     app.success = False
-    observed = reader.read_trade_fatigue(app, ocr, poll_seconds=0)
+    observed = reader.read_departure_fatigue(app, ocr, poll_seconds=0)
     assert observed['reason'] == 'capture_failed' and observed['current_fatigue'] is None
     assert ocr.calls == []
 
@@ -150,7 +150,7 @@ def test_cooperative_cancellation_stops_before_any_capture():
         raise RuntimeError('cancelled')
 
     with pytest.raises(RuntimeError, match='cancelled'):
-        reader.read_trade_fatigue(app, ocr, check_cancelled=cancel)
+        reader.read_departure_fatigue(app, ocr, check_cancelled=cancel)
     assert app.calls == []
 
 
@@ -163,7 +163,7 @@ def test_cancellation_between_left_and_right_stops_second_ocr():
             raise StopTaskException('cancelled', False)
 
     with pytest.raises(StopTaskException):
-        reader.read_trade_fatigue(app, ocr, check_cancelled=cancel_after_left)
+        reader.read_departure_fatigue(app, ocr, check_cancelled=cancel_after_left)
     assert len(ocr.calls) == 1 and len(app.calls) == 1
 
 
@@ -180,6 +180,6 @@ def test_slow_ocr_cannot_authorize_success(monkeypatch):
         return value
 
     ocr.recognize_all = recognize
-    observed = reader.read_trade_fatigue(app, ocr, poll_seconds=0, timeout_sec=1.0)
+    observed = reader.read_departure_fatigue(app, ocr, poll_seconds=0, timeout_sec=1.0)
     assert observed['reason'] == 'observation_timeout' and observed['success'] is False
     assert observed['current_fatigue'] is None

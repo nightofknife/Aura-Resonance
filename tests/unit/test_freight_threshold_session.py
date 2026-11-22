@@ -140,14 +140,14 @@ def test_equal_start_skips_both_without_consumption():
 def test_equal_600_start_skips_both_in_fixed_water_then_bento_order():
     h = Harness([])
     session = h.session(water_stop=100, bento_start=600, bento_stop=100)
-    observe_trade(session, 600)
+    observe_profile(session, 600)
     result = check(session)
     assert h.calls == []
     assert [(stage, state) for stage, state, _ in h.emits] == [
         ("sparkling_water", "skipped"), ("bento", "skipped")]
     assert "recovery_priority" not in result["recovery"]
     assert result["recovery"]["checked_order"] == ["sparkling_water", "bento"]
-    assert result["recovery"]["fatigue_source"] == "trade_page"
+    assert result["recovery"]["fatigue_source"] == "profile"
     assert session.summary()["final_fatigue"] == 600
 
 
@@ -158,7 +158,7 @@ def test_fixed_water_first_rechecks_bento_start_using_postwater_actual(water_fin
     h = Harness([water_final], free_uses=2, child=bento_result(
         start=600, stop=100, initial=water_final, final=81))
     session = h.session(water_stop=100, bento_start=600, bento_stop=100)
-    observe_trade(session, 801)
+    observe_profile(session, 801)
     result = check(session)
     assert [call[0] for call in h.calls] == expected_calls
     assert result["recovery"]["checked_order"] == ["sparkling_water", "bento"]
@@ -179,7 +179,7 @@ def test_fixed_water_first_rechecks_bento_start_using_postwater_actual(water_fin
 def test_only_bento_start_is_met_so_water_check_skips_then_bento_runs():
     h = Harness([], child=bento_result(start=600, stop=100, initial=850, final=70))
     session = h.session(water_start=900, water_stop=100, bento_start=600, bento_stop=100)
-    observe_trade(session, 850)
+    observe_profile(session, 850)
     result = check(session)
     assert [call[0] for call in h.calls] == ["bento"]
     assert result["recovery"]["checked_order"] == ["sparkling_water", "bento"]
@@ -196,12 +196,12 @@ def test_distinct_thresholds_allow_bento_in_one_city_and_water_after_later_trave
     h = Harness([700], child=bento_result(start=600, stop=100, initial=850, final=100))
     session = h.session(water_start=900, water_stop=100, bento_start=600, bento_stop=100,
                         travel_cost=lambda _leg: 900)
-    observe_trade(session, 850)
+    observe_profile(session, 850)
     first = check(session)
     assert [call[0] for call in h.calls] == ["bento"]
     assert first["recovery"]["sparkling_water"]["triggered"] is False
     cost = session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
-    session.observe_travel({"success": True, "status": "ok"}, cost)
+    session.observe_travel(arrived_from_map(100), cost)
     h.child = bento_result(start=600, stop=100, initial=700, final=100)
     second = asyncio.run(session.check(city_name="B", city_index=1, page_state="city_main"))
     assert [call[0] for call in h.calls] == ["bento", "water", "refresh", "bento"]
@@ -222,7 +222,7 @@ def test_bento_failure_after_successful_water_keeps_water_receipt_and_partial_be
         start=600, stop=100, initial=750, final=650, consumed=2, completed=1,
         success=False, status="failed", reason="rating_failed"))
     session = h.session(water_stop=100, bento_start=600, bento_stop=100)
-    observe_trade(session, 850)
+    observe_profile(session, 850)
     with pytest.raises(RecoveryStopError, match="rating_failed"):
         check(session)
     assert [call[0] for call in h.calls] == ["water", "refresh", "bento"]
@@ -244,33 +244,38 @@ def test_disabled_resource_does_not_block_enabled_resource(water, bento, expecte
     h = Harness([550], child=bento_result(start=600, stop=100, initial=850, final=70))
     session = h.session(water=water, bento=bento, water_stop=100,
                         bento_start=600, bento_stop=100)
-    observe_trade(session, 850)
+    observe_profile(session, 850)
     check(session)
     assert [call[0] for call in h.calls] == expected
     assert session.summary()["final_fatigue"] == (550 if water else 70)
 
 
-def observe_trade(session, fatigue):
-    session.accept_trade_reading({"success": True, "source": "trade_page",
-                                 "current_fatigue": fatigue, "max_fatigue": 1000})
+def observe_profile(session, fatigue):
+    session._set_observed(fatigue, "profile")
 
 
-def test_confirmed_trade_reading_keeps_city_panel_without_profile_navigation():
+def arrived_from_map(fatigue):
+    return {"success": True, "status": "ok", "departure_fatigue": {
+        "success": True, "source": "departure_map", "current_fatigue": fatigue, "max_fatigue": 1000,
+    }}
+
+
+def test_confirmed_profile_reading_keeps_city_panel_without_profile_navigation():
     h = Harness([])
     session = h.session()
-    observe_trade(session, 600)
+    observe_profile(session, 600)
     result = check(session)
     assert result["page_state"] == "city_panel"
     assert h.calls == []
-    assert result["recovery"]["initial_fatigue_source"] == "trade_page"
+    assert result["recovery"]["initial_fatigue_source"] == "profile"
     assert session.summary()["final_fatigue"] == 600
     assert session.summary()["estimated_fatigue"] is None
 
 
-def test_confirmed_trade_fatigue_routes_bento_from_current_panel_without_extra_profile():
+def test_confirmed_profile_fatigue_routes_bento_from_current_panel_without_extra_profile():
     h = Harness([], rest=False, child=bento_result())
     session = h.session()
-    observe_trade(session, 750)
+    observe_profile(session, 750)
     result = check(session)
     assert [call[0] for call in h.calls] == ["bento"]
     assert h.calls[0][1] == "city_panel"
@@ -282,10 +287,10 @@ def test_confirmed_trade_fatigue_routes_bento_from_current_panel_without_extra_p
 def test_route_derived_fatigue_triggers_recovery_without_presenting_it_as_observed():
     h = Harness([])
     session = h.session(travel_cost=lambda _leg: 100)
-    observe_trade(session, 500)
+    observe_profile(session, 500)
     cost = session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
     assert session.summary()["final_fatigue"] is None
-    session.observe_travel({"success": True, "status": "ok"}, cost)
+    session.observe_travel(arrived_from_map(500), cost)
     result = check(session)
     assert not h.calls
     assert result["recovery"]["initial_fatigue"] == 600
@@ -301,11 +306,11 @@ def test_cancel_during_route_cost_lookup_is_propagated_before_travel_starts():
     def travel_cost(_leg):
         raise cancelled
     session = h.session(travel_cost=travel_cost)
-    observe_trade(session, 500)
+    observe_profile(session, 500)
     with pytest.raises(RecoveryStopError) as raised:
         session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
     assert raised.value is cancelled
-    assert session.summary()["fatigue_tracking"]["source"] == "trade_page"
+    assert session.summary()["fatigue_tracking"]["source"] == "profile"
     assert session.summary()["final_fatigue"] == 500
     assert not h.calls
 
@@ -315,10 +320,10 @@ def test_missing_route_data_value_error_requires_arrival_refresh_without_failing
     def travel_cost(_leg):
         raise ValueError("route fatigue unavailable")
     session = h.session(water=False, travel_cost=travel_cost)
-    observe_trade(session, 500)
+    observe_profile(session, 500)
     cost = session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
     assert cost is None and session.summary()["final_fatigue"] is None
-    session.observe_travel({"success": True, "status": "ok"}, cost)
+    session.observe_travel(arrived_from_map(500), cost)
     result = check(session)
     assert h.calls == [("refresh", "city_panel")]
     assert result["recovery"]["initial_fatigue"] == 620
@@ -328,9 +333,9 @@ def test_missing_route_data_value_error_requires_arrival_refresh_without_failing
 def test_derived_bento_started_event_labels_calculated_fatigue_without_actual_field():
     h = Harness([], child=bento_result(initial=750))
     session = h.session(water=False, travel_cost=lambda _leg: 100)
-    observe_trade(session, 650)
+    observe_profile(session, 650)
     cost = session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
-    session.observe_travel({"success": True, "status": "ok"}, cost)
+    session.observe_travel(arrived_from_map(650), cost)
     check(session)
     started = next(fields for stage, state, fields in h.emits
                    if stage == "bento" and state == "started")
@@ -344,9 +349,9 @@ def test_derived_bento_started_event_labels_calculated_fatigue_without_actual_fi
 def test_water_actual_reading_can_equal_route_estimate_and_still_calibrate_then_run_bento():
     h = Harness([750], free_uses=3, child=bento_result(initial=750))
     session = h.session(travel_cost=lambda _leg: 100)
-    observe_trade(session, 650)
+    observe_profile(session, 650)
     cost = session.begin_travel({"from_city_id": "1", "to_city_id": "2"})
-    session.observe_travel({"success": True, "status": "ok"}, cost)
+    session.observe_travel(arrived_from_map(650), cost)
     result = check(session)
     assert [call[0] for call in h.calls] == ["water", "refresh", "bento"]
     assert h.calls[0][2]["current_fatigue"] == 750
@@ -370,22 +375,21 @@ def test_invalid_bento_contract_never_registers_returned_fatigue_as_an_actual_re
     child.update(invalid)
     h = Harness([], rest=False, child=child)
     session = h.session(water=False)
-    observe_trade(session, 750)
+    observe_profile(session, 750)
     with pytest.raises(RecoveryStopError, match="bento_result_invalid"):
         check(session)
     summary = session.summary()
     assert summary["final_fatigue"] is None and summary["estimated_fatigue"] is None
     assert summary["fatigue_tracking"]["current_fatigue"] is None
     assert summary["fatigue_tracking"]["last_observed_fatigue"] == 750
-    assert summary["fatigue_tracking"]["last_observed_source"] == "trade_page"
+    assert summary["fatigue_tracking"]["last_observed_source"] == "profile"
 
 
-def test_invalid_trade_observation_forgets_prior_value_then_refreshes_once():
+def test_invalid_departure_observation_forgets_prior_value_then_refreshes_once():
     h = Harness([710], rest=False, child=bento_result(initial=710))
     session = h.session()
-    observe_trade(session, 500)
-    session.accept_trade_reading({"success": False, "current_fatigue": 500,
-                                 "max_fatigue": 1000, "source": "trade_page"})
+    observe_profile(session, 500)
+    session.observe_travel({"success": True, "status": "ok", "departure_fatigue": {"success": False}}, 0)
     result = check(session)
     assert [call[0] for call in h.calls] == ["refresh", "bento"]
     assert result["recovery"]["initial_fatigue"] == 710
@@ -394,7 +398,7 @@ def test_invalid_trade_observation_forgets_prior_value_then_refreshes_once():
 def test_post_water_observation_is_reused_at_next_unchanged_checkpoint():
     h = Harness([450])
     session = h.session(bento=False)
-    observe_trade(session, 750)
+    observe_profile(session, 750)
     first = check(session)
     second = check(session, phase="pre_departure")
     assert [call[0] for call in h.calls] == ["water", "refresh"]
@@ -406,7 +410,7 @@ def test_post_water_observation_is_reused_at_next_unchanged_checkpoint():
 def test_post_bento_observation_is_reused_at_next_unchanged_checkpoint():
     h = Harness([], rest=False, child=bento_result())
     session = h.session(water=False)
-    observe_trade(session, 750)
+    observe_profile(session, 750)
     check(session)
     check(session, phase="pre_departure")
     assert [call[0] for call in h.calls] == ["bento"]
@@ -470,8 +474,7 @@ def test_multi_city_aggregation_does_not_reuse_old_consumption_or_expose_mutable
     # No new fatigue increase: a later check does not replay the first water batch.
     asyncio.run(session.check(city_name="A", city_index=0, page_state="city_main", phase="pre_departure"))
     h.rest = False
-    session.accept_trade_reading({"success": True, "current_fatigue": 850,
-                                 "max_fatigue": 1000, "source": "trade_page"})
+    observe_profile(session, 850)
     asyncio.run(session.check(city_name="B", city_index=1, page_state="city_panel"))
     summary = session.summary()
     assert len(summary["recovery_events"]) == 3
@@ -531,8 +534,6 @@ def test_predeparture_recovery_failure_keeps_confirmed_trade_and_book_usage(monk
                         lambda **_kwargs: pytest.fail("must not depart after failed recovery"))
     class Session:
         def invalidate_fatigue(self):
-            pass
-        def accept_trade_reading(self, observation):
             pass
         def begin_travel(self, leg):
             pytest.fail("must not begin travel after failed recovery")

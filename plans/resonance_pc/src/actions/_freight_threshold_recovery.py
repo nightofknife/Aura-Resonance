@@ -6,6 +6,7 @@ from asyncio import CancelledError
 from typing import Any
 
 from packages.resonance_shared.freight_parameters import FATIGUE_MEDICINES, normalize_fatigue_medicine_limits
+from packages.aura_core.observability.logging.core_logger import logger
 
 from ._freight_recovery_policy import plan_threshold_water_use, validate_recovery_thresholds
 from ._freight_fatigue_ledger import FreightFatigueLedger
@@ -22,8 +23,7 @@ class FreightRecoverySession:
                  bento_start, bento_stop, priority, refresh_fatigue, water_counts,
                  has_rest, drink_water, consume_bentos, emit=None, travel_cost=None,
                  medicine_enabled=False, medicine_start=600, medicine_stop=100,
-                 medicine_limits=None, consume_medicine=None,
-                 require_trade_reading=False):
+                 medicine_limits=None, consume_medicine=None):
         if type(water_enabled) is not bool or type(bento_enabled) is not bool:
             raise ValueError("Recovery switches must be booleans")
         if water_enabled:
@@ -49,23 +49,11 @@ class FreightRecoverySession:
         self.medicine_limits = normalize_fatigue_medicine_limits(medicine_limits)
         self.consume_medicine = consume_medicine
         self.medicine_usage: dict[str, int] = {}
-        self.require_trade_reading = require_trade_reading
 
     def invalidate_fatigue(self):
         """An unmeasured operation makes the preceding reading historical."""
         self.final_fatigue = None
         self.ledger.invalidate("unmeasured_operation")
-
-    def accept_trade_reading(self, observation):
-        self.invalidate_fatigue()
-        if (isinstance(observation, dict) and observation.get("success") is True
-                and observation.get("source") == "trade_page"
-                and type(observation.get("max_fatigue")) is int
-                and observation["max_fatigue"] > 0):
-            self.final_fatigue = self.ledger.set_observed(
-                observation.get("current_fatigue"), "trade_page", observation["max_fatigue"])
-        else:
-            self.ledger.invalidate("trade_fatigue_unrecognized")
 
     def begin_travel(self, leg):
         cost = None
@@ -82,6 +70,14 @@ class FreightRecoverySession:
         return cost
 
     def observe_travel(self, travel, cost):
+        departure = travel.get("departure_fatigue") if isinstance(travel, dict) else None
+        if (isinstance(departure, dict) and departure.get("success") is True
+                and departure.get("source") == "departure_map"
+                and type(departure.get("max_fatigue")) is int and departure["max_fatigue"] > 0):
+            self.ledger.set_observed(departure.get("current_fatigue"), "departure_map",
+                                     departure["max_fatigue"])
+        else:
+            self.ledger.invalidate("departure_fatigue_unrecognized")
         self.ledger.observe_travel(travel, cost)
         self.final_fatigue = None
 
@@ -269,7 +265,7 @@ class FreightRecoverySession:
         return "city_main"
 
     async def check(self, *, city_name, city_index, page_state, scope="route", phase="arrival",
-                    rest_stop=None):
+                    rest_stop=None, confirm_after_trade=False):
         """A rest callback may share one visit with unrelated local shopping."""
         if not self.enabled:
             return (await rest_stop(None, page_state) if rest_stop else {"page_state": page_state})
@@ -282,19 +278,34 @@ class FreightRecoverySession:
                 self.invalidate_fatigue()
                 raise RecoveryStopError("recovery_invalid_start_page", event)
             current = self.ledger.current_fatigue
-            if self.require_trade_reading and self.ledger.source != "trade_page":
-                event.update(success=True, status="skipped", page_state=page_state,
-                             reason="trade_fatigue_unrecognized")
-                self._track_event(event)
-                for stage, enabled in (("sparkling_water", self.water_enabled), ("bento", self.bento_enabled),
-                                       ("fatigue_medicine", self.medicine_enabled)):
-                    if enabled:
-                        await self._emit(stage, "skipped", event, reason=event["reason"])
-                return {"page_state": page_state, "recovery": event}
+            if confirm_after_trade:
+                thresholds = (("sparkling_water", self.water_enabled, self.water_start),
+                              ("bento", self.bento_enabled, self.bento_start),
+                              ("fatigue_medicine", self.medicine_enabled, self.medicine_start))
+                if self.ledger.source != "route_derived":
+                    current = None
+                event.update(estimated_arrival_fatigue=current, estimate_source=self.ledger.source,
+                             estimate_invalid_reason=self.ledger.invalid_reason)
+                # Trading may change fatigue. The pre-trade value only gates profile navigation.
+                self.invalidate_fatigue()
+                should_refresh = current is None or any(
+                    enabled and current > start for _, enabled, start in thresholds)
+                logger.info("[FreightRecovery] city=%s estimated_arrival_fatigue=%s refresh_profile=%s",
+                            city_name, current, should_refresh)
+                if not should_refresh:
+                    reason = "estimate_at_or_below_start_threshold"
+                    event.update(success=True, status="skipped", page_state=page_state, reason=reason)
+                    self._track_event(event)
+                    for stage, enabled, _ in thresholds:
+                        if enabled:
+                            await self._emit(stage, "skipped", event, reason=reason)
+                    return {"page_state": page_state, "recovery": event}
+                current = None
             if current is None:
                 current = await self.refresh_fatigue(page_state)
                 page_state = "city_main"
                 self._set_observed(current, "profile")
+                logger.info("[FreightRecovery] city=%s profile_fatigue=%s", city_name, current)
             if not self._observed(current):
                 raise RecoveryStopError("recovery_fatigue_invalid", event)
             event.update(initial_fatigue=current, initial_fatigue_source=self.ledger.source)

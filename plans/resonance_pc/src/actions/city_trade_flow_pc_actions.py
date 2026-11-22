@@ -73,7 +73,6 @@ from ._freight_threshold_recovery import FreightRecoverySession
 from ._freight_fatigue_medicine import consume_fatigue_medicine
 from packages.resonance_shared.freight_parameters import normalize_fatigue_medicine_limits
 from ._fatigue_observation import fatigue_window_key
-from ._trade_fatigue_observation import read_trade_fatigue
 from ._player_data_persistence import load_pc_user_info
 from ._trade_buy_selection import (
     TradeBuySelectionError, load_product_templates, select_buy_products,
@@ -1545,7 +1544,6 @@ def _execute_city_trade_inside_current_city(
     city_shop_data: ResonancePcCityShopDataService,
     progress_context: Optional[Dict[str, Any]] = None,
     shop_entry: Optional[Dict[str, Any]] = None,
-    capture_fatigue: bool = False,
 ) -> Dict[str, Any]:
     progress_token = _WORKER_PROGRESS_CONTEXT.set(dict(progress_context or {}))
     try:
@@ -1561,7 +1559,6 @@ def _execute_city_trade_inside_current_city(
             vision=vision,
             city_shop_data=city_shop_data,
             shop_entry=shop_entry,
-            capture_fatigue=capture_fatigue,
         )
     finally:
         _WORKER_PROGRESS_CONTEXT.reset(progress_token)
@@ -1580,7 +1577,6 @@ def _execute_city_trade_inside_current_city_scoped(
     vision: Any,
     city_shop_data: ResonancePcCityShopDataService,
     shop_entry: Optional[Dict[str, Any]] = None,
-    capture_fatigue: bool = False,
 ) -> Dict[str, Any]:
     products = [str(item).strip() for item in (buy_products or []) if str(item).strip()]
     logger.info(
@@ -1675,24 +1671,11 @@ def _execute_city_trade_inside_current_city_scoped(
         buy.get("page_state") if isinstance(buy, dict) else None,
         dict(_WORKER_PROGRESS_CONTEXT.get()),
     )
-    fatigue_observation = None
-    if capture_fatigue:
-        try:
-            fatigue_observation = read_trade_fatigue(
-                app=app, ocr=ocr, vision=vision, check_cancelled=_check_trade_cancelled)
-        except (Exception, asyncio.CancelledError) as exc:
-            if hasattr(exc, "code") or isinstance(exc, asyncio.CancelledError):
-                exc.detail = {**(getattr(exc, "detail", {}) or {}), "city_trade": {
-                    "success": True, "page_state": "shop_page", "current_city": current_city,
-                    "sell": sell, "buy": buy}}
-            raise
-        logger.info("[FreightRecovery] trade fatigue city=%s observation=%s", current_city, fatigue_observation)
     main = resonance_pc_go_city_main_direct(app=app, vision=vision)
     if main.get("success") is not True or main.get("page_state") != "city_main":
         _raise_error("trade_main_not_restored", "City trade did not return to main", {
             **main, "city_trade": {"success": True, "page_state": "shop_page",
-                                  "current_city": current_city, "sell": sell, "buy": buy,
-                                  "fatigue_observation": fatigue_observation}})
+                                  "current_city": current_city, "sell": sell, "buy": buy}})
     logger.info(
         "[CityTrade] phase=completed city=%s sold_confirmed=%s buy_confirmed=%s page_state=%s context=%s",
         current_city,
@@ -1714,7 +1697,6 @@ def _execute_city_trade_inside_current_city_scoped(
         "buy_node": buy_node,
         "buy": buy,
         "go_city_main": main,
-        "fatigue_observation": fatigue_observation,
     }
 
 
@@ -2067,7 +2049,6 @@ def _make_freight_recovery_session(*, water_enabled, bento_enabled, water_start,
         drink_water=drink, consume_bentos=consume, emit=emit,
         medicine_enabled=medicine_enabled, medicine_start=medicine_start, medicine_stop=medicine_stop,
         medicine_limits=medicine_limits, consume_medicine=medicate,
-        require_trade_reading=True,
         travel_cost=lambda leg: market_data.get_travel_fatigue(
             str(leg.get("from_city_id") or ""), str(leg.get("to_city_id") or "")),
     )
@@ -2655,8 +2636,6 @@ async def _execute_trade_leg(
             {"page_state": page_state, "leg": leg},
         )
 
-    if recovery_session is not None:
-        recovery_session.invalidate_fatigue()
     city_trade = await _execute_freight_city_trade(
         auto_trade_goods_investment=bool(auto_trade_goods_investment and index > 0),
         trade_goods_investment_mode=trade_goods_investment_mode,
@@ -2672,7 +2651,6 @@ async def _execute_trade_leg(
         vision=vision,
         city_shop_data=city_shop_data,
         progress_context=progress_fields,
-        **({"capture_fatigue": True} if recovery_session is not None else {}),
     )
     page_state = str(city_trade.get("page_state") or "city_main")
     if city_trade.get("success") is not True or page_state != "city_main":
@@ -2680,11 +2658,10 @@ async def _execute_trade_leg(
 
     recovered = None
     if recovery_session is not None:
-        recovery_session.accept_trade_reading(city_trade.get("fatigue_observation"))
         try:
             recovered = await recovery_session.check(
                 city_name=str(leg.get("from_city") or ""), city_index=index,
-                page_state=page_state, phase="pre_departure")
+                page_state=page_state, phase="pre_departure", confirm_after_trade=True)
         except Exception as exc:
             if hasattr(exc, "code") and isinstance(getattr(exc, "detail", None), dict):
                 exc.detail = {**exc.detail, "city_trade": city_trade}
@@ -2732,6 +2709,7 @@ async def _execute_trade_leg(
             app=app,
             ocr=ocr,
             vision=vision,
+            **({"capture_departure_fatigue": True} if recovery_session is not None else {}),
             **({"expect_passenger_settlement": True}
                if passenger_session is not None and passenger_session.loaded_destination is not None
                and passenger_session.loaded_destination.get("city_index") == index + 1 else {}),
@@ -3177,6 +3155,7 @@ async def _execute_freight_reposition(
                 **({"auto_escort": True} if auto_escort else {}),
                 pickup_on_trailer_only=True,
                 app=app, ocr=ocr, vision=vision,
+                **({"capture_departure_fatigue": True} if recovery_session is not None else {}),
                 **({"use_trailer": True, "trailer_daily_first_n": trailer_plan.daily_first_n,
                     "trailer_payment": trailer_plan.payment}
                    if trailer_plan is not None and trailer_plan.should_use("reposition", index) else {}),
@@ -4006,7 +3985,6 @@ async def resonance_pc_auto_cycle_trade_flow(
                     ocr=ocr,
                     vision=vision,
                     city_shop_data=resonance_pc_city_shop_data,
-                    **({"capture_fatigue": True} if recovery_session is not None else {}),
                     progress_context={
                         "leg_index": len(route),
                         "leg_count": len(route),
@@ -4046,8 +4024,6 @@ async def resonance_pc_auto_cycle_trade_flow(
                     current_city=endpoint_city,
                     data={"final_sale": final_sale},
                 )
-            if sale_confirmed and recovery_session is not None:
-                recovery_session.accept_trade_reading(final_sale.get("fatigue_observation"))
     elif page_state == "city_panel" and reposition_execution is None:
         _check_trade_cancelled()
         cleanup = await tracked_to_thread(

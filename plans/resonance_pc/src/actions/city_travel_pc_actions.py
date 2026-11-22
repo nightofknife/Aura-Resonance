@@ -20,6 +20,7 @@ from packages.aura_core.scheduler.cancellation import is_current_task_cancel_req
 from packages.aura_core.utils.task_errors import recognition_failure
 from ._city_panel_vision import CityPanelVisionError, VISIT_REGION, VISIT_THRESHOLD, probe_visit_entry
 from ._depart_button_vision import DepartButtonError, probe_depart_button, wait_depart_button, POLL_INTERVAL
+from ._departure_fatigue_observation import read_departure_fatigue
 from ._operation_progress import observe_operation
 from ._cancellable_wait import sleep_slices
 from ._freight_trailer_policy import validate_trailer_options, verified_quota_skip
@@ -1106,6 +1107,7 @@ def resonance_pc_intercity_depart_and_wait(
     auto_escort: bool = False,
     *,
     pickup_on_trailer_only: bool = False,
+    capture_departure_fatigue: bool = False,
 ) -> Dict[str, Any]:
     _check_intercity_cancelled()
     validate_trailer_options(use_trailer, trailer_daily_first_n, trailer_payment)
@@ -1126,6 +1128,11 @@ def resonance_pc_intercity_depart_and_wait(
     _check_intercity_cancelled()
     observe_operation("travel.destination", "进入地图并选择目的地", "started", to_city_name=to_city_name)
     _open_intercity_map(app, vision)
+    departure_fatigue = None
+    if capture_departure_fatigue:
+        departure_fatigue = read_departure_fatigue(app, ocr, check_cancelled=_check_intercity_cancelled)
+        logger.info("[FreightRecovery] departure fatigue from=%s to=%s observation=%s",
+                    from_city_name, to_city_name, departure_fatigue)
 
     selected = resonance_pc_select_intercity_destination(
         to_city_name=to_city_name,
@@ -1237,6 +1244,7 @@ def resonance_pc_intercity_depart_and_wait(
             "arrival_status": arrival.get("status"),
             "encounter_actions": int(arrival.get("encounter_actions") or 0),
             "arrival": arrival,
+            **({"departure_fatigue": departure_fatigue} if capture_departure_fatigue else {}),
             **({"trailer_service": trailer_attempts[-1], "trailer_attempts": trailer_attempts,
                 "travel_method": "trailer" if gate_state == "trailer_departed" else "normal"}
                if trailer_attempts else {}),
