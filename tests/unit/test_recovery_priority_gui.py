@@ -26,12 +26,16 @@ def page(tmp_path):
     app.processEvents()
 
 
-def test_defaults_allow_enabling_either_resource_without_filling_thresholds(page):
+def test_defaults_allow_enabling_all_resources_without_filling_thresholds(page):
     assert {key: getattr(page, key).value() for key in DEFAULT_RECOVERY_THRESHOLDS} == DEFAULT_RECOVERY_THRESHOLDS
     assert not hasattr(page, "recovery_priority")
     assert not hasattr(page, "recovery_priority_panel")
     page.auto_sparkling_water.setChecked(True)
     page.auto_bento.setChecked(True)
+    runtime = page.collect_task_inputs()
+    assert "fatigue_medicine_start_threshold" not in runtime
+    assert "fatigue_medicine_stop_threshold" not in runtime
+    page.use_fatigue_medicine.setChecked(True)
     runtime = page.collect_task_inputs()
     assert "recovery_priority" not in runtime
     assert all(runtime[key] == value for key, value in DEFAULT_RECOVERY_THRESHOLDS.items())
@@ -77,10 +81,11 @@ def test_existing_custom_and_unset_values_are_never_overwritten(page):
 
 
 def test_threshold_validation_uses_new_missing_defaults_but_keeps_explicit_unset_invalid():
-    validate_freight_recovery_thresholds({"auto_sparkling_water": True, "auto_bento": True})
+    enabled = {"auto_sparkling_water": True, "auto_bento": True, "use_fatigue_medicine": True}
+    validate_freight_recovery_thresholds(enabled)
     for key in DEFAULT_RECOVERY_THRESHOLDS:
         with pytest.raises(ValueError):
-            validate_freight_recovery_thresholds({"auto_sparkling_water": True, "auto_bento": True, key: None})
+            validate_freight_recovery_thresholds({**enabled, key: None})
 
 
 def test_inactive_obsolete_order_is_always_removed_without_mutating_input():
