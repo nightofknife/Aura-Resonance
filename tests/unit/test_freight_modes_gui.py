@@ -194,12 +194,16 @@ def test_multiple_endpoints_and_preview_run_share_parameters(page):
     page.start_city.setCurrentIndex(page.start_city.findData("1"))
     page.market_proxy_mode.setCurrentIndex(page.market_proxy_mode.findData("manual"))
     page.market_proxy_port.setText("7890")
+    assert page.market_source_mode.currentData() == "automatic"
+    page.market_source_mode.setCurrentIndex(page.market_source_mode.findData("mirror"))
+    page.reload_market_proxy()
     run = page.collect_task_inputs()
     preview = page.collect_task_inputs(preview=True)
     assert run["required_end_city_ids"] == ["1", "11"]
     assert preview.pop("start_city_id") == "1"
     assert preview["market_proxy_mode"] == "manual"
     assert preview["market_proxy_port"] == 7890
+    assert preview["market_source_mode"] == "mirror"
     assert preview == {key: value for key, value in run.items() if key in TRADE_PREVIEW_REQUEST_KEYS}
 
 

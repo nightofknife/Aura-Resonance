@@ -841,10 +841,18 @@ class TradePage(QWidget):
         )
 
         parameter_heading(layout, "行情连接")
+        self.market_source_mode = QComboBox(content)
+        self.market_source_mode.addItem("自动", "automatic")
+        self.market_source_mode.addItem("科伦巴直连", "columba")
+        self.market_source_mode.addItem("蜜瓜转接", "mirror")
+        self.market_source_mode.setToolTip(
+            "自动优先使用科伦巴，失败时尝试蜜瓜转接。两个固定选项只访问所选来源，均遵循连接方式设置。"
+        )
+        parameter_row(layout, "行情来源", self.market_source_mode)
         self.market_proxy_mode = QComboBox(content)
         self.market_proxy_mode.addItem("自动连接", "automatic")
         self.market_proxy_mode.addItem("手动代理", "manual")
-        self.market_proxy_mode.setToolTip("此设置仅用于获取科伦巴行情，货运和试算共用。")
+        self.market_proxy_mode.setToolTip("此设置用于获取商品行情，货运和试算共用。")
         self.market_proxy_port = QLineEdit(content)
         self.market_proxy_port.setPlaceholderText("1–65535")
         self.market_proxy_port.setValidator(
@@ -1133,6 +1141,7 @@ class TradePage(QWidget):
             getattr(self, key).valueChanged.connect(self._on_recovery_threshold_changed)
         for widget in (self.auto_sparkling_water, self.auto_bento, self.use_fatigue_medicine):
             widget.toggled.connect(self._sync_parameter_controls)
+        self.market_source_mode.currentIndexChanged.connect(self._save_market_proxy)
         self.market_proxy_mode.currentIndexChanged.connect(self._save_market_proxy)
         self.market_proxy_port.textChanged.connect(self._save_market_proxy)
 
@@ -1140,13 +1149,16 @@ class TradePage(QWidget):
         values = self._settings.load_market_proxy()
         mode = values["market_proxy_mode"]
         port = values["market_proxy_port"]
-        with QSignalBlocker(self.market_proxy_mode), QSignalBlocker(self.market_proxy_port):
+        with (QSignalBlocker(self.market_source_mode), QSignalBlocker(self.market_proxy_mode),
+              QSignalBlocker(self.market_proxy_port)):
+            self.market_source_mode.setCurrentIndex(self.market_source_mode.findData(values["market_source_mode"]))
             self.market_proxy_mode.setCurrentIndex(self.market_proxy_mode.findData(mode))
             self.market_proxy_port.setText(str(port) if port is not None else "")
         self._sync_market_proxy_controls()
         self._sync_actions()
 
     def _sync_market_proxy_controls(self) -> None:
+        self.market_source_mode.setEnabled(not self._busy)
         self.market_proxy_mode.setEnabled(not self._busy)
         self.market_proxy_port.setEnabled(not self._busy and self.market_proxy_mode.currentData() == "manual")
 
@@ -1154,6 +1166,7 @@ class TradePage(QWidget):
         text = self.market_proxy_port.text()
         port = int(text) if text.isdecimal() else 0
         values = {
+            "market_source_mode": self.market_source_mode.currentData(),
             "market_proxy_mode": self.market_proxy_mode.currentData(),
             "market_proxy_port": port if 1 <= port <= 65535 else None,
         }
@@ -1170,7 +1183,8 @@ class TradePage(QWidget):
 
     def _market_proxy_request(self) -> dict[str, Any]:
         values = self._settings.load_market_proxy()
-        return normalize_market_proxy(values["market_proxy_mode"], values["market_proxy_port"])
+        proxy = normalize_market_proxy(values["market_proxy_mode"], values["market_proxy_port"])
+        return {**proxy, "market_source_mode": values["market_source_mode"]}
 
     def _on_recovery_threshold_changed(self, *_args: object) -> None:
         if self._restoring or not self._form_ready:
@@ -2332,6 +2346,7 @@ class TradePage(QWidget):
             str(summary.get("reason") or "当前规划参数下无可执行路线") if no_plan
             else "行情更新失败，已使用本地市场快照"
             if summary.get("market_source") == "fallback_cache"
+            else "本方案使用蜜瓜转接行情" if summary.get("market_source") in {"mirror", "mirror_fallback"}
             else "行情已更新，本方案使用最新快照"
         )
         if summary.get("snapshot_id"):

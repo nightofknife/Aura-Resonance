@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh the Aura market mirror
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=aura-market
+Group=aura-market
+WorkingDirectory=/opt/aura-market-mirror
+StateDirectory=aura-market-mirror
+StateDirectoryMode=0750
+ExecStart=/usr/bin/python3 -B -m scripts.release.market_mirror sync --state /var/lib/aura-market-mirror
+TimeoutStartSec=25s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes

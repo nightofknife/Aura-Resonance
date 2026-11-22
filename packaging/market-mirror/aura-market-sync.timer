@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the Aura market mirror every 90 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=90s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

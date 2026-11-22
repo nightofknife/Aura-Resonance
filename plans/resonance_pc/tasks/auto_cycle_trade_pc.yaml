@@ -6,6 +6,12 @@ auto_cycle_trade_pc:
     description: Plan one exact full-budget route from a frozen market snapshot and execute it once.
     entry_point: true
     inputs:
+      - name: market_source_mode
+        type: string
+        required: false
+        default: automatic
+        enum: [automatic, columba, mirror]
+        description: 行情来源（自动、科伦巴直连或蜜瓜转接）。
       - name: market_proxy_mode
         type: string
         required: false
@@ -1518,6 +1524,7 @@ auto_cycle_trade_pc:
       action: resonance_pc.auto_cycle_trade_flow
       depends_on: preflight
       params:
+        market_source_mode: "{{ inputs.market_source_mode | default('automatic') }}"
         market_proxy_mode: "{{ inputs.market_proxy_mode | default('automatic') }}"
         market_proxy_port: "{{ inputs.market_proxy_port | default(none) }}"
         auto_passenger: "{{ inputs.auto_passenger | default(false) }}"

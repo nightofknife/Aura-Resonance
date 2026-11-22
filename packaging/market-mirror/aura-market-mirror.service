@@ -1,0 +1,19 @@
+[Unit]
+Description=Serve the last validated Aura market snapshot
+
+[Service]
+User=aura-market
+Group=aura-market
+WorkingDirectory=/opt/aura-market-mirror
+StateDirectory=aura-market-mirror
+StateDirectoryMode=0750
+ExecStart=/usr/bin/python3 -B -m scripts.release.market_mirror serve --state /var/lib/aura-market-mirror --port 18444
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

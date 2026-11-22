@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 from packages.resonance_shared.freight_parameters import effective_freight_inputs
-from packages.resonance_shared.market_proxy import normalize_market_proxy
+from packages.resonance_shared.market_proxy import normalize_market_proxy, validate_market_source
 from packages.resonance_shared.passenger_parameters import normalize_passenger_options
 
 PC_GAME_NAME = "resonance_pc"
@@ -1244,7 +1244,11 @@ def trade_result_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def market_fallback_notice(values: Mapping[str, Any]) -> str:
-    if values.get("market_source") != "fallback_cache":
+    source = values.get("market_source")
+    if source in {"mirror", "mirror_fallback"}:
+        headline = "科伦巴行情更新失败，已使用蜜瓜转接。" if source == "mirror_fallback" else "已使用蜜瓜转接行情。"
+        return f"{headline}\nVPS 抓取时间：{values.get('market_fetched_at') or '未知'}"
+    if source != "fallback_cache":
         return ""
     headline = ("行情刷新失败，已停止货运；未使用历史行情继续操作。"
                 if values.get("market_fallback_blocked")
@@ -1318,6 +1322,8 @@ def normalize_trade_task_inputs(inputs: Mapping[str, Any] | None) -> dict[str, A
         normalized["passenger_options"] = normalize_passenger_options(normalized.get("passenger_options"), enabled=enabled)
     if "allow_stale_market" in normalized:
         normalized["allow_stale_market"] = validate_allow_stale_market(normalized["allow_stale_market"])
+    if "market_source_mode" in normalized:
+        normalized["market_source_mode"] = validate_market_source(normalized["market_source_mode"])
     if "market_proxy_mode" in normalized or "market_proxy_port" in normalized:
         normalized.update(normalize_market_proxy(
             normalized.get("market_proxy_mode", "automatic"),
