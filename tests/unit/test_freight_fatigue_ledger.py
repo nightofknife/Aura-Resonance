@@ -10,16 +10,16 @@ def normal(**changes):
 
 def test_trade_observation_replaces_negotiation_and_previous_route_consumption():
     ledger = FreightFatigueLedger()
-    assert ledger.set_observed(77, "trade_page", max_fatigue=872) == 77
+    assert ledger.set_observed(77, "departure_map", max_fatigue=872) == 77
     assert ledger.observe_travel(normal(), 100) == 177
     assert ledger.observe_travel(normal(), 20) == 197
     snapshot = ledger.snapshot()
     assert snapshot["source"] == "route_derived"
     assert snapshot["last_observed_fatigue"] == 77
-    assert snapshot["last_observed_source"] == "trade_page"
+    assert snapshot["last_observed_source"] == "departure_map"
     assert snapshot["added_travel_fatigue"] == 120
     # The post-negotiation reading includes that negotiation already.
-    assert ledger.set_observed(213, "trade_page") == 213
+    assert ledger.set_observed(213, "departure_map") == 213
     assert ledger.snapshot()["added_travel_fatigue"] == 0
     assert ledger.observe_travel(normal(), 30) == 243
 
@@ -27,7 +27,7 @@ def test_trade_observation_replaces_negotiation_and_previous_route_consumption()
 @pytest.mark.parametrize("source", ["profile", "water", "bento", "medicine"])
 def test_recovery_and_fallback_observations_rebase(source):
     ledger = FreightFatigueLedger()
-    ledger.set_observed(600, "trade_page")
+    ledger.set_observed(600, "departure_map")
     ledger.observe_travel(normal(), 50)
     assert ledger.set_observed(300, source) == 300
     assert ledger.snapshot()["source"] == source
@@ -38,8 +38,8 @@ def test_recovery_and_fallback_observations_rebase(source):
 @pytest.mark.parametrize("value", [None, True, False, -1, "77", 77.0])
 def test_invalid_observations_forbid_reusing_old_current(value):
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
-    assert ledger.set_observed(value, "trade_page") is None
+    ledger.set_observed(77, "departure_map")
+    assert ledger.set_observed(value, "departure_map") is None
     assert ledger.snapshot()["current_fatigue"] is None
     assert ledger.snapshot()["source"] is None
     assert ledger.snapshot()["last_observed_fatigue"] == 77
@@ -48,13 +48,13 @@ def test_invalid_observations_forbid_reusing_old_current(value):
 @pytest.mark.parametrize("limit", [True, False, 0, -1, "872", 872.0])
 def test_invalid_capacity_rejected(limit):
     ledger = FreightFatigueLedger()
-    assert ledger.set_observed(77, "trade_page", max_fatigue=limit) is None
+    assert ledger.set_observed(77, "departure_map", max_fatigue=limit) is None
     assert ledger.snapshot()["invalid_reason"] == "invalid_max_fatigue"
 
 
 def test_over_capacity_is_valid_game_state_and_never_clamped():
     ledger = FreightFatigueLedger()
-    assert ledger.set_observed(900, "trade_page", max_fatigue=872) == 900
+    assert ledger.set_observed(900, "departure_map", max_fatigue=872) == 900
     assert ledger.observe_travel(normal(), 10) == 910
 
 
@@ -82,7 +82,7 @@ def test_over_capacity_is_valid_game_state_and_never_clamped():
 ])
 def test_unpredictable_travel_requires_fallback_without_faking_actual(travel, cost, reason):
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
+    ledger.set_observed(77, "departure_map")
     ledger.begin_travel()
     assert ledger.observe_travel(travel, cost) is None
     assert ledger.snapshot()["invalid_reason"] == reason
@@ -97,7 +97,7 @@ def test_unpredictable_travel_requires_fallback_without_faking_actual(travel, co
                                      normal(trailer_service={"status": "departed"})])
 def test_confirmed_trailer_uses_the_same_leg_cost(travel):
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
+    ledger.set_observed(77, "departure_map")
     ledger.begin_travel()
     assert ledger.observe_travel(travel, 50) == 127
     assert ledger.snapshot()["source"] == "route_derived"
@@ -105,7 +105,7 @@ def test_confirmed_trailer_uses_the_same_leg_cost(travel):
 
 def test_denied_trailer_attempt_does_not_invalidate_confirmed_normal_travel():
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
+    ledger.set_observed(77, "departure_map")
     assert ledger.observe_travel(normal(
         travel_method="normal", trailer_service={"departed": False, "status": "blocked"}), 5) == 82
 
@@ -118,7 +118,7 @@ def test_arrival_success_contract_allows_absent_optional_arrival_status():
 
 def test_departure_hides_stale_fatigue_until_arrival_then_adds_cost_once():
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
+    ledger.set_observed(77, "departure_map")
     ledger.begin_travel()
     ledger.begin_travel()  # A duplicate start notification cannot discard the private baseline.
     assert ledger.snapshot()["current_fatigue"] is None
@@ -142,7 +142,7 @@ def test_invalidating_pending_travel_cannot_resurrect_departure_value():
 
 def test_observing_after_departure_replaces_pending_baseline():
     ledger = FreightFatigueLedger()
-    ledger.set_observed(77, "trade_page")
+    ledger.set_observed(77, "departure_map")
     ledger.begin_travel()
     ledger.set_observed(50, "profile")
     assert ledger.observe_travel(normal(), 10) == 60

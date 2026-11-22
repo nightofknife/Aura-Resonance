@@ -1,3 +1,4 @@
+import asyncio
 import threading
 from types import SimpleNamespace
 import time
@@ -9,14 +10,18 @@ import pytest
 import win32event
 
 from packages.aura_core.context.plan import current_plan_name
+from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout
 from plans.aura_base.src.platform.contracts import TargetRuntimeError
 from plans.resonance_pc.src.actions.runtime_preflight_pc_actions import resonance_pc_require_client_resolution
 from plans.resonance_pc.src.actions._deep_dive_four_view_reader import source_key
 from plans.resonance_pc.src.actions._deep_dive_frame_source import stream_metadata
-from plans.resonance_pc.src.bridge.frame_stream import BACKEND, BridgeFrameStream, HEIGHT, WIDTH, _HEADER, _PIXEL_BYTES
+from plans.resonance_pc.src.bridge.frame_stream import (
+    BACKEND, BridgeFrameStream, HEIGHT, WIDTH, _DIAGNOSTIC_TRAILER, _FRAME_BYTES, _HEADER, _PIXEL_BYTES,
+)
+from plans.resonance_pc.src.bridge import frame_stream as frame_stream_module
 from plans.resonance_pc.src.services.bridge_target_runtime_service import ResonancePcTargetRuntimeService
 from plans.resonance_pc.src.services.bridge_app_service import ResonancePcAppService
-from plans.resonance_pc.src.services import input_bridge_service
+from plans.resonance_pc.src.services import bridge_target_runtime_service, input_bridge_service
 from plans.resonance_pc.src.services.input_bridge_service import ResonancePcInputBridgeService
 
 
@@ -30,12 +35,200 @@ def stream():
 
 
 def publish(stream, generation, *, age=0., state=1):
-    tick = int((time.monotonic() - stream._clock_origin - age) * stream._frequency)
+    tick = int((frame_stream_module.time.monotonic() - stream._clock_origin - age) * stream._frequency)
     # Store RGBA in Unity's bottom-up order.
     pixels = np.zeros((HEIGHT, WIDTH, 4), dtype=np.uint8)
     pixels[-1, 17] = (2, 7, 11, 99)
     stream._buffer[:_HEADER.size] = _HEADER.pack(state, WIDTH, HEIGHT, _PIXEL_BYTES, generation, tick, 100)
-    stream._buffer[_HEADER.size:] = pixels.tobytes()
+    stream._buffer[_HEADER.size:_FRAME_BYTES] = pixels.tobytes()
+
+
+@pytest.fixture
+def recovery_runtime(stream, monkeypatch):
+    config = {"resonance_pc.input.mode": "bridge"}
+    monkeypatch.delenv("AURA_GUI_INPUT_BRIDGE", raising=False)
+    bridge = ResonancePcInputBridgeService(config=config)
+    runtime = ResonancePcTargetRuntimeService(config, bridge)
+    bridge._viewport = {"width": WIDTH, "height": HEIGHT}
+    bridge._frame_stream = stream
+    bridge._session_root_cid = "-"
+    clock = SimpleNamespace(now=time.monotonic(), delayed=None)
+
+    def sleep(duration):
+        clock.now += duration
+        if clock.delayed is not None and clock.now >= clock.delayed[0]:
+            _, generation, state = clock.delayed
+            publish(stream, generation, state=state)
+            clock.delayed = None
+
+    virtual_time = SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
+    monkeypatch.setattr(bridge_target_runtime_service, "time", virtual_time)
+    monkeypatch.setattr(frame_stream_module, "time", virtual_time)
+    monkeypatch.setattr(stream, "_query_clock", lambda: int((clock.now - stream._clock_origin) * stream._frequency))
+    events = []
+    monkeypatch.setattr(bridge_target_runtime_service, "log_event", lambda event, **data: events.append((event, data)))
+    app = ResonancePcAppService(SimpleNamespace(target_runtime=runtime), SimpleNamespace(bridge=bridge))
+    token = current_plan_name.set("resonance_pc")
+    try:
+        yield runtime, app, clock, events
+    finally:
+        current_plan_name.reset(token)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_fresh_capture_waits_through_three_second_scene_change(stream, recovery_runtime, cached):
+    runtime, _, clock, events = recovery_runtime
+    if cached:
+        publish(stream, 4, age=.1)
+    start = clock.now
+    clock.delayed = (start + 3, 5, 1)
+    frame = runtime.capture((16, 0, 2, 1))
+    assert clock.now - start == pytest.approx(3, abs=.006)
+    assert not frame.stale and frame.frame_generation == 5
+    assert frame.image[0, 1].tolist() == [2, 7, 11]
+    event, details = events[-1]
+    assert event == "capture.bridge_recovered" and details["used_stale_fallback"] is False
+
+
+def test_stale_opt_in_keeps_capture_identity_and_four_second_budget(stream, recovery_runtime):
+    _, app, clock, events = recovery_runtime
+    publish(stream, 4, age=.1)
+    start = clock.now
+    returned = []
+    for rect in ((16, 0, 2, 1), (17, 0, 1, 1), (16, 0, 2, 1)):
+        returned.append(app.capture_latest(rect=rect))
+    assert all(frame.stale for frame in returned)
+    assert {frame.frame_id for frame in returned} == {f"{stream.session_id}:4"}
+    assert {frame.frame_generation for frame in returned} == {4}
+    assert len({frame.captured_at_monotonic for frame in returned}) == 1
+    assert returned[1].image[0, 0].tolist() == [2, 7, 11]
+    with pytest.raises(TargetRuntimeError) as error:
+        app.capture_latest()
+    assert error.value.code == "bridge_capture_timeout"
+    assert clock.now - start == pytest.approx(4)
+    assert [event for event, _ in events] == ["capture.bridge_stale"] * 3 + ["capture.bridge_timeout"]
+
+
+def test_fresh_frame_replaces_stale_and_new_request_gets_its_own_budget(stream, recovery_runtime):
+    _, app, clock, events = recovery_runtime
+    publish(stream, 4, age=.1)
+    start = clock.now
+    first = app.capture_latest()
+    clock.delayed = (start + 2.5, 5, 1)
+    assert app.capture_latest().frame_id == first.frame_id
+    latest = app.capture_latest()
+    assert latest.frame_generation == 5 and not latest.stale
+    assert events[-1][0] == "capture.bridge_recovered"
+    assert events[-1][1]["used_stale_fallback"] is True
+    assert app.capture_latest().frame_id == latest.frame_id
+    assert clock.now - start == pytest.approx(3.5, abs=.02)
+
+
+def test_viewport_change_or_outer_deadline_do_not_return_cached_frame(stream, recovery_runtime):
+    _, app, clock, events = recovery_runtime
+    publish(stream, 4, age=.1)
+    start = clock.now
+    scope = OperationScope(target=app.target_runtime, timeout=.5, monotonic=lambda: clock.now)
+    with scope.activate(), pytest.raises(OperationTimeout):
+        app.capture_latest()
+    assert clock.now - start == pytest.approx(.5, abs=.006)
+    clock.delayed = (clock.now + .2, 5, 2)
+    with pytest.raises(TargetRuntimeError) as error:
+        app.capture_latest()
+    assert error.value.code == "viewport_changed"
+    assert not events
+
+
+def test_bound_viewport_change_invalidates_even_the_unmodified_native_buffer(stream, recovery_runtime):
+    runtime, app, _, events = recovery_runtime
+    publish(stream, 4, age=.1)
+    stream.target_key = (None, (WIDTH, HEIGHT, 1), None)
+    runtime.bridge._viewport["generation"] = 2
+    with pytest.raises(TargetRuntimeError, match="viewport changed") as error:
+        app.capture_latest()
+    assert error.value.code == "viewport_changed"
+    assert stream.capture_stream_frame(allow_stale=True) is None
+    assert not events
+
+
+def test_cooperative_cancellation_never_returns_a_cached_frame(stream, recovery_runtime, monkeypatch):
+    _, app, clock, events = recovery_runtime
+    publish(stream, 4, age=.1)
+    stop_at = clock.now + .3
+    monkeypatch.setattr(bridge_target_runtime_service, "is_current_task_cancel_requested",
+                        lambda: clock.now >= stop_at)
+    with pytest.raises(asyncio.CancelledError):
+        app.capture_latest()
+    assert clock.now == pytest.approx(stop_at, abs=.006, rel=0)
+    assert stream._capture_wait is None and not events
+
+
+def test_failure_attachment_includes_marked_cached_frame(stream, recovery_runtime):
+    runtime, _, _, _ = recovery_runtime
+    runtime.bridge._mode = "bridge"
+    publish(stream, 4, age=2.)
+    result = runtime._capture_failure_png({"plan": "resonance_pc", "root_cid": "-"})
+    assert result["png"].startswith(b"\x89PNG")
+    assert result["stale"] is True and result["frame_generation"] == 4
+    assert result["frame_age_ms"] == pytest.approx(2000, abs=.01)
+
+
+def test_diagnostic_snapshot_reads_native_timing_and_legacy_frame_age(stream, monkeypatch):
+    publish(stream, 1)
+    legacy = stream.diagnostic_snapshot()
+    assert legacy["generation"] == 1 and legacy["last_unity_frame"] == 100
+    assert 0 <= legacy["last_frame_age_ms"] < 250
+    assert "last_native_capture_ms" not in legacy
+
+    now = 10 * stream._frequency
+    monkeypatch.setattr(stream, "_query_clock", lambda: now)
+    ticks = stream._frequency // 1000
+    _DIAGNOSTIC_TRAILER.pack_into(
+        stream._buffer, _FRAME_BYTES, 4, 3, now - 410*ticks, now - 500*ticks,
+        290*ticks, 2, now - 790*ticks, 101,
+    )
+    assert stream.diagnostic_snapshot() == {
+        "generation": 2, "last_unity_frame": 101, "last_frame_age_ms": 790.0,
+        "native_capture_attempts": 3, "last_native_capture_ms": 290.0,
+        "native_capture_in_progress_ms": 410.0,
+    }
+    assert stream.capture_stream_frame()["generation"] == 1
+    # An odd sequence means the writer has not finished its metadata update.
+    _DIAGNOSTIC_TRAILER.pack_into(stream._buffer, _FRAME_BYTES, 5, 0, 0, 0, 0, 0, 0, 0)
+    assert stream.diagnostic_snapshot() == {}
+
+
+def test_capture_timeout_logs_changed_generation_even_if_new_frame_was_stale(stream, monkeypatch):
+    config = {"resonance_pc.input.mode": "bridge"}
+    monkeypatch.delenv("AURA_GUI_INPUT_BRIDGE", raising=False)
+    bridge = ResonancePcInputBridgeService(config=config)
+    runtime = ResonancePcTargetRuntimeService(config, bridge)
+    bridge._viewport = {"width": WIDTH, "height": HEIGHT}
+    bridge._frame_stream = stream
+    bridge._session_root_cid = "-"
+    events = []
+    monkeypatch.setattr(bridge_target_runtime_service, "log_event", lambda event, **data: events.append((event, data)))
+    raw_poll = stream.capture_stream_frame
+    publish(stream, 4, age=2)
+
+    def offer_stale_frame(*args, **kwargs):
+        publish(stream, 5, age=2)
+        return raw_poll(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "capture_stream_frame", offer_stale_frame)
+    token = current_plan_name.set("resonance_pc")
+    try:
+        with pytest.raises(TargetRuntimeError) as error:
+            runtime.capture((30, 470, 540, 180))
+    finally:
+        current_plan_name.reset(token)
+    assert error.value.code == "bridge_capture_timeout"
+    assert events == [("capture.bridge_timeout", error.value.detail)]
+    detail = error.value.detail
+    assert detail["frame_generation_start"] == 4 and detail["frame_generation_end"] == 5
+    assert detail["frame_generation_changed"] is True
+    assert detail["last_frame_age_ms"] > 250
+    assert detail["last_native_capture_ms"] is None
 
 
 def test_poll_is_atomic_and_rejects_old_or_replaced_frames(stream):

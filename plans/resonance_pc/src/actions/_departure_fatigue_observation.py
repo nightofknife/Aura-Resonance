@@ -1,4 +1,4 @@
-"""Read fatigue on a stable trade page without leaving or operating the page."""
+"""Read the travel map's fatigue HUD before selecting a destination."""
 from __future__ import annotations
 
 import math
@@ -14,23 +14,23 @@ from ._fatigue_observation import FatigueConfirmation, read_fatigue_pair
 
 
 # 1280x720 game-client coordinates. Exclude the adjacent fatigue '+' button.
-TRADE_FATIGUE_ROI = (938, 14, 95, 24)
+DEPARTURE_FATIGUE_ROI = (1112, 19, 95, 24)
 
 
 def _check_cancelled() -> None:
     if is_current_task_cancel_requested():
-        raise StopTaskException("Trade fatigue reading cancelled", success=False)
+        raise StopTaskException("Departure fatigue reading cancelled", success=False)
 
 
-def read_trade_fatigue(
-    app: Any, ocr: Any, vision: Any = None, *,
+def read_departure_fatigue(
+    app: Any, ocr: Any, *,
     check_cancelled: Callable[[], None] | None = None,
     max_attempts: int = 4, timeout_sec: float = 3.0, poll_seconds: float = 0.08,
 ) -> dict:
     """Return two matching fresh observations, or unknown for navigation fallback.
 
-    The caller must have confirmed the trade page and dismissed settlement
-    overlays. No screenshot or observation survives an input or polling round.
+    The caller has opened the travel map to begin a new leg. No screenshot or
+    observation survives an input or polling round.
     Cancellation and the enclosing operation deadline always propagate.
     """
     if type(max_attempts) is not int or not 2 <= max_attempts <= 8:
@@ -54,10 +54,10 @@ def read_trade_fatigue(
         value = None
         frame_id = None
         try:
-            frame = observation.capture_regions((TRADE_FATIGUE_ROI,))
+            frame = observation.capture_regions((DEPARTURE_FATIGUE_ROI,))
             frame_id = frame.id
             guard()
-            value, reason = read_fatigue_pair(frame, TRADE_FATIGUE_ROI, ocr, guard=guard)
+            value, reason = read_fatigue_pair(frame, DEPARTURE_FATIGUE_ROI, ocr, guard=guard)
         except (OperationTimeout, TaskControlException):
             raise
         except CaptureError:
@@ -73,7 +73,7 @@ def read_trade_fatigue(
             break
         if confirmation.feed(value, frame_id):
             return {"success": True, "current_fatigue": value[0], "max_fatigue": value[1],
-                    "reason": "stable", "source": "trade_page", "attempts": attempts}
+                    "reason": "stable", "source": "departure_map", "attempts": attempts}
         if value is not None:
             reason = "unstable_fatigue"
         if attempts < max_attempts:
@@ -81,4 +81,4 @@ def read_trade_fatigue(
             time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
     guard()
     return {"success": False, "current_fatigue": None, "max_fatigue": None,
-            "reason": reason, "source": "trade_page", "attempts": attempts}
+            "reason": reason, "source": "departure_map", "attempts": attempts}

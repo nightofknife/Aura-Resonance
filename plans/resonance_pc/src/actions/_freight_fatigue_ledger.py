@@ -1,7 +1,7 @@
 """Keep observed freight fatigue separate from confirmed route additions.
 
-Completed normal and trailer travel have the same predictable addition. Negotiation is already
-included in the trade-page observation and must never be added here again.
+Completed normal and trailer travel have the same predictable addition. Departure HUD readings
+already include any negotiation before leaving the city.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 
 class FreightFatigueLedger:
-    OBSERVATION_SOURCES = frozenset({"trade_page", "profile", "water", "bento", "medicine"})
+    OBSERVATION_SOURCES = frozenset({"departure_map", "profile", "water", "bento", "medicine"})
 
     def __init__(self):
         self.current_fatigue: int | None = None

@@ -4,7 +4,7 @@
 namespace bridge {
 class FrameStream {
 public:
-  void open(const std::string &session, DWORD client_pid, int width, int height);
+  void open(const std::string &session, DWORD client_pid, int width, int height, bool diagnostics);
   void close();
   bool enabled() const { return view_ != nullptr; }
   void publish(uint64_t frame, HWND window);
@@ -16,6 +16,7 @@ private:
   uint64_t generation_{};
   int64_t interval_{}, next_capture_{};
   uint32_t error_{};
+  bool diagnostics_{};
   Class texture_capture_{}, unity_object_{};
   Method capture_method_{};
 };

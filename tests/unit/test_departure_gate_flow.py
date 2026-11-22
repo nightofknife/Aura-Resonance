@@ -45,6 +45,22 @@ def test_normal_route_keeps_map_selection_without_entry_ocr(flow, monkeypatch):
     assert flow.events == ["open_map", ("select", "栖羽站", "海角城")]
 
 
+def test_freight_reads_departure_hud_before_selecting_destination(flow, monkeypatch):
+    observation = {"success": True, "current_fatigue": 881, "max_fatigue": 888,
+                   "source": "departure_map", "reason": "stable"}
+
+    def read(app, ocr, *, check_cancelled):
+        assert app is flow.app and check_cancelled is m._check_intercity_cancelled
+        flow.events.append("read_fatigue")
+        return observation
+
+    monkeypatch.setattr(m, "read_departure_fatigue", read)
+    monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "confirm_clicked"})
+    result = run(flow, capture_departure_fatigue=True)
+    assert result["departure_fatigue"] == observation
+    assert flow.events == ["open_map", "read_fatigue", ("select", "栖羽站", "海角城")]
+
+
 @pytest.mark.parametrize("ready", [True, False])
 def test_fatigue_popup_only_returns_and_reports_blocked(flow, monkeypatch, ready):
     monkeypatch.setattr(m, "_wait_departure_gate", lambda **kwargs: {"state": "fatigue_panel"})
