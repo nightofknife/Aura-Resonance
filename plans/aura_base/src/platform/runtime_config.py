@@ -289,11 +289,14 @@ def resolve_runtime_config(config: Any) -> ResolvedRuntimeConfig:
     )
 
 
-def supported_capture_backends(provider: str) -> list[str]:
-    normalized = _normalized(provider)
-    if normalized == WINDOWS_PROVIDER:
-        return list(WINDOWS_CAPTURE_BACKENDS)
-    return []
+def supported_capture_backends(provider: str, *, include_auto: bool = False) -> list[str]:
+    """List concrete backends, optionally including the automatic startup setting."""
+    if _normalized(provider) != WINDOWS_PROVIDER:
+        return []
+    backends = list(WINDOWS_CAPTURE_BACKENDS)
+    if include_auto:
+        backends.append("auto")
+    return backends
 
 
 def supported_input_backends(provider: str) -> list[str]:
@@ -380,9 +383,7 @@ def _resolve_capture_config(
     provider: str, capture_data: Mapping[str, Any], warnings: list[str]
 ) -> RuntimeCaptureConfig:
     backend = _normalized(capture_data.get("backend"), default="gdi")
-    valid_backends = supported_capture_backends(provider)
-    if provider == WINDOWS_PROVIDER:
-        valid_backends.append("auto")
+    valid_backends = supported_capture_backends(provider, include_auto=True)
     if backend not in valid_backends:
         raise TargetRuntimeError(
             "capture_backend_invalid_for_provider",
