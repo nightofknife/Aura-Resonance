@@ -150,6 +150,7 @@ def test_return_failure_keeps_confirmed_investment_without_resubmission(rig, mon
     rig.reader.VIEWPORT = (33, 130, 410, 460)
     monkeypatch.setattr(investment, "InvestmentVision", lambda **kwargs: rig.reader)
     monkeypatch.setattr(investment, "_wait", lambda *args: (None, {"center": (840, 490), "availability": "available", "white_score": .99, "gray_score": .1}))
+    monkeypatch.setattr(investment, "_open_investment_entry", lambda *args: None)
     monkeypatch.setattr(investment, "_cards", lambda *args: (None, [card]))
     monkeypatch.setattr(investment, "_current_card", lambda app, reader, card: (None, card))
     monkeypatch.setattr(investment, "_select", lambda *args: (None, card, {"current": 0, "preview": 1}))

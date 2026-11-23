@@ -142,6 +142,7 @@ def execute(rig, monkeypatch, mode=10, product_levels=None, product_caps=None, p
               "locked": False, "selected": False, "investment_index": index + 1} for index in range(3)]
     monkeypatch.setattr(investment, "InvestmentVision", lambda **kwargs: reader)
     monkeypatch.setattr(investment, "_wait", lambda app, predicate: (FRAME, predicate(FRAME)))
+    monkeypatch.setattr(investment, "_open_investment_entry", lambda *args: None)
     monkeypatch.setattr(investment, "_cards", lambda *args: (FRAME, cards))
     monkeypatch.setattr(investment, "_current_card", lambda app, reader, card: (FRAME, card))
     monkeypatch.setattr(investment, "_scroll", lambda *args: None)

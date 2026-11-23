@@ -39,6 +39,8 @@ def visit(monkeypatch, tmp_path):
             return f"fixture-city9-count{state.count}"
 
         def read_entry_state(self, frame):
+            if state.phase != "shop":
+                raise investment.InvestmentRecognitionError("investment_entry_missing", "entry disappeared")
             return {"availability": "available", "center": (840, 490),
                     "white_score": .95, "gray_score": .7}
 

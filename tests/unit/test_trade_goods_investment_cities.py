@@ -111,6 +111,7 @@ def test_processed_city_count_avoids_final_rescan_and_drag(monkeypatch):
     monkeypatch.setattr(investment, "_wait", lambda app, predicate: (FRAME, predicate(FRAME)))
     monkeypatch.setattr(investment, "_click", lambda *args: None)
     monkeypatch.setattr(investment, "_pause", lambda *args: None)
+    monkeypatch.setattr(investment, "_open_investment_entry", lambda *args: None)
     monkeypatch.setattr(investment, "_cards", lambda *args: events.append("scan") or (FRAME, cards))
     monkeypatch.setattr(investment, "_current_card", lambda app, reader, card: (FRAME, card))
     monkeypatch.setattr(investment, "_select", lambda app, r, card: events.append(card["rect"]) or

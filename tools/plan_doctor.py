@@ -541,7 +541,8 @@ class ComplianceChecker:
             input_cfg = runtime_cfg.get("input", {}) if isinstance(runtime_cfg.get("input"), dict) else {}
 
             backend = str(capture_cfg.get("backend") or "").strip().lower()
-            if backend and backend not in supported_capture:
+            capture_options = self.supported_capture_backends(runtime_provider, include_auto=True)
+            if backend and backend not in capture_options:
                 findings.append(self._finding("error", "runtime_backend_invalid", f"Unsupported {runtime_provider} capture backend '{backend}'.", config_path, self._hint("runtime_backend_invalid")))
             input_backend = str(input_cfg.get("backend") or "").strip().lower()
             if input_backend and input_backend not in supported_input:
@@ -744,7 +745,8 @@ class ComplianceChecker:
             "transition_task_missing": "For each transition add: transition_task: \"tasks:transitions:<name>.yaml\"",
             "required_state_missing": "Keep task meta.requires_initial_state aligned with states_map.yaml state names.",
             "runtime_backend_invalid": (
-                "Windows capture backends: wgc, dxgi, gdi, printwindow\n"
+                "Windows capture.backend accepts auto, wgc, dxgi, gdi, and printwindow.\n"
+                "Windows capture candidates require a concrete backend.\n"
                 "Windows input backends: sendinput, window_message"
             ),
             "window_target_selector_missing": (

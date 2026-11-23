@@ -27,6 +27,9 @@ _POLL_SECONDS = 0.2
 _ADJUST_CLICK_INTERVAL = 0.08
 _UNCHANGED_ADJUST_REREAD_DELAY = 0.9
 _STATE_TIMEOUT = 5.0
+_ENTRY_TIMEOUT = 8.0
+_ENTRY_RETRY_INTERVAL = 2.0
+_ENTRY_MAX_CLICKS = 3
 _COMMIT_TIMEOUT = 8.0
 _MAX_SCROLLS = 40
 _MAX_TRANSACTIONS = 500
@@ -434,9 +437,7 @@ def _scrolled_card_indices(previous_cards: list[dict], cards: list[dict], overla
     return [{**card, "investment_index": first_index + offset} for offset, card in enumerate(cards)]
 
 
-def _observe_shop_return(app: Any, vision: Any, reader: InvestmentVision) -> dict:
-    """Observe both pages from one frame; only a known investment page permits input."""
-    image = _capture(app)
+def _match_exchange_menu(image: np.ndarray, vision: Any) -> tuple[bool, float | None]:
     menu = vision.find_template(
         source_image=image[350:470, 720:940],
         template_image=str(_PLAN_ROOT / "templates/commerce/trade/shop/menu_ready.png"),
@@ -445,9 +446,71 @@ def _observe_shop_return(app: Any, vision: Any, reader: InvestmentVision) -> dic
     score = getattr(menu, "confidence", None)
     valid = (isinstance(score, (int, float)) and math.isfinite(score)
              and not (getattr(menu, "debug_info", None) or {}).get("error"))
-    result = {"page": "unknown", "shop_seen": bool(valid and menu.found),
-              "menu_score": score if valid else None, "back_point": None}
-    if not valid:
+    return bool(valid and menu.found), score if valid else None
+
+
+def _observe_investment_entry(app: Any, vision: Any, reader: InvestmentVision):
+    try:
+        image = _capture(app)
+    except TradeGoodsInvestmentError as exc:
+        if exc.code not in {"investment_capture_failed", "investment_resolution_mismatch"}:
+            raise
+        return "unknown", None
+
+    try:
+        entry = reader.read_entry_state(image)
+        if entry["availability"] != "available":
+            return "unavailable", None
+        shop_seen, _ = _match_exchange_menu(image, vision)
+        if shop_seen and not any(reader.match(image, name)["found"] for name in ("page_anchor", "success")):
+            return "available", entry["center"]
+    except InvestmentRecognitionError as exc:
+        if exc.code == "investment_entry_missing":
+            return "gone", None
+    return "unknown", None
+
+
+def _open_investment_entry(app: Any, vision: Any, reader: InvestmentVision, center) -> None:
+    started = time.monotonic()
+    deadline = started + _ENTRY_TIMEOUT
+    clicks = 0
+    retry_at = started
+    state, stable = "unknown", 0
+    while time.monotonic() < deadline:
+        if clicks:
+            observed_state, center = _observe_investment_entry(app, vision, reader)
+            _cancel_check()
+            now = time.monotonic()
+            stable = stable + 1 if observed_state == state else 1
+            state = observed_state
+            if now >= deadline:
+                break
+            if state == "gone" and stable >= 2:
+                logger.info("[TradeGoodsInvestmentEntry] phase=entry_disappeared clicks=%s", clicks)
+                return
+            retry_ready = (state == "available" and stable >= 2 and center is not None
+                           and clicks < _ENTRY_MAX_CLICKS and now >= retry_at)
+            if not retry_ready:
+                _pause(min(_POLL_SECONDS, deadline - now))
+                continue
+        _click(app, center)
+        clicks += 1
+        retry_at = time.monotonic() + _ENTRY_RETRY_INTERVAL
+        logger.info("[TradeGoodsInvestmentEntry] phase=clicked attempt=%s center=%s", clicks, center)
+        state, stable = "unknown", 0
+    raise TradeGoodsInvestmentError(
+        "investment_entry_open_unconfirmed", "Could not confirm that the investment entry disappeared",
+        {"click_attempts": clicks, "last_entry_state": state,
+         "elapsed_ms": round((time.monotonic() - started) * 1000)},
+    )
+
+
+def _observe_shop_return(app: Any, vision: Any, reader: InvestmentVision) -> dict:
+    """Observe both pages from one frame; only a known investment page permits input."""
+    image = _capture(app)
+    shop_seen, score = _match_exchange_menu(image, vision)
+    result = {"page": "unknown", "shop_seen": shop_seen, "menu_score": score, "back_point": None}
+    if score is None:
         return result
     try:
         investment = reader.match(image, "page_anchor")["found"]
@@ -568,8 +631,7 @@ def execute_trade_goods_investment_from_shop(*, mode: int, city_name: str, app: 
                    white_score=entry["white_score"], gray_score=entry["gray_score"])
             return result
         if product_limit != 0:
-            _click(app, entry["center"])
-            _pause(.4)
+            _open_investment_entry(app, vision, reader, entry["center"])
             frame, cards = _cards(app, reader)
             frame, cards = _initial_card_indices(app, reader, frame, cards)
         while product_limit != 0:
