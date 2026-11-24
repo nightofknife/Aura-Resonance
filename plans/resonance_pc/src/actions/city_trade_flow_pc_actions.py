@@ -61,8 +61,8 @@ from ._city_shop_entry import CityShopEntryError, enter_city_shop, probe_menu_te
 from .market_data_pc_actions import _market_request_options, resonance_pc_market_refresh
 from .purchase_book_pc_actions import resonance_pc_use_purchase_books
 from .rubbish_recycling_pc_actions import (
+    _execute_rubbish_recycling_from_city_panel,
     is_rubbish_recycling_arrival,
-    resonance_pc_execute_rubbish_recycling_from_city_panel,
 )
 from ._sparkling_water_policy import validate_recovery_snapshot
 from ._freight_recovery_policy import (
@@ -961,11 +961,17 @@ def resonance_pc_open_city_panel_from_main(
     app: Any = None,
     vision: Any = None,
 ) -> Dict[str, Any]:
+    return _open_city_panel_from_main(app=app, vision=vision, timeout_sec=timeout_sec)
+
+
+def _open_city_panel_from_main(
+    *, app: Any, vision: Any, timeout_sec: float = 12.0, identify_city: bool = True,
+) -> Dict[str, Any]:
     if app is None or vision is None:
         raise RuntimeError("app/vision services are required")
     try:
         return open_city_panel(app=app, vision=vision, check_cancelled=_check_trade_cancelled,
-                               timeout_sec=timeout_sec)
+                               timeout_sec=timeout_sec, identify_city=identify_city)
     except CityPanelVisionError as exc:
         _raise_error(exc.code, exc.message, exc.detail)
 
@@ -2992,18 +2998,21 @@ async def _execute_rubbish_recycling_after_arrival(
     try:
         _check_trade_cancelled()
         open_city = await tracked_to_thread(
-            resonance_pc_open_city_panel_from_main,
+            _open_city_panel_from_main,
             app=app,
             vision=vision,
+            identify_city=False,
         )
         observe_operation("rubbish_recycling.execute", "垃圾回收子任务", "started")
         _check_trade_cancelled()
         recycling = await tracked_to_thread(
-            resonance_pc_execute_rubbish_recycling_from_city_panel,
+            _execute_rubbish_recycling_from_city_panel,
             city_name=arrival_city,
             app=app,
             vision=vision,
             resonance_pc_city_shop_data=city_shop_data,
+            city_panel_confirmed=(open_city.get("success") is True
+                                  and open_city.get("page_state") == "city_panel"),
         )
         if (recycling.get("success") is not True or recycling.get("final_state") != "empty"
                 or recycling.get("page_state") != "city_panel"

@@ -13,9 +13,9 @@ from plans.resonance_pc.src.actions import city_trade_flow_pc_actions as trade
 CITY = {"city_id": "14", "city_key": "farstar_bridge", "city_name": "远星大桥",
         "shop_name": "垃圾处理中心"}
 STATION = {"x": 610, "y": 520}
-POINTS = {"station_label": (625, 460), "entry": (980, 330), "enabled": (1120, 120),
+POINTS = {"city_panel": (62, 672), "entry": (980, 330), "enabled": (1120, 120),
           "empty": (1120, 120), "reward_exit": (640, 680), "back": (80, 36)}
-CONTROLS = {"city_panel": "station_label", "station_menu": "entry",
+CONTROLS = {"city_panel": "city_panel", "station_menu": "entry",
             "has_rubbish": "enabled", "empty": "empty", "reward": "reward_exit"}
 
 
@@ -132,9 +132,10 @@ def test_already_empty_skips_recycling_and_reward_clicks(rig):
     assert result["reward"] is None and result["recycle_click"] is None
     assert result["reward_overlay_seen"] is False
     assert len(rig.ui.clicks) == 4 and rig.ui.state == "city_panel"
+    assert rig.ui.clicks[2][3] - rig.ui.clicks[1][3] >= 4.0 + flow._POST_CLICK_SEC
 
 
-@pytest.mark.parametrize("stage", ["open_station", "enter_recycle", "recycle_all",
+@pytest.mark.parametrize("stage", ["open_station", "recycle_all",
                                     "dismiss_reward", "return_station", "return_city"])
 def test_dropped_first_click_is_retried_only_on_its_source_page(rig, stage):
     rig.ui.drops[stage] = 1
@@ -146,24 +147,24 @@ def test_dropped_first_click_is_retried_only_on_its_source_page(rig, stage):
     assert result["click_history"][stage][1]["reason"] == "source_page_still_visible"
 
 
-@pytest.mark.parametrize("stage,source,control,point,target", [
-    ("open_station", "city_panel", None, (610, 520), "station_menu"),
-    ("enter_recycle", "station_menu", "entry", None, "has_rubbish"),
-    ("recycle_all", "has_rubbish", "enabled", None, "empty"),
-    ("dismiss_reward", "reward", None, (500, 500), "empty"),
-    ("return_station", "empty", "back", None, "station_menu"),
-    ("return_city", "station_menu", "back", None, "city_panel"),
+@pytest.mark.parametrize("stage,source,control,point,target,max_clicks", [
+    ("open_station", "city_panel", None, (610, 520), "station_menu", 2),
+    ("enter_recycle", "station_menu", "entry", None, "has_rubbish", 1),
+    ("recycle_all", "has_rubbish", "enabled", None, "empty", 3),
+    ("dismiss_reward", "reward", None, (500, 500), "empty", 3),
+    ("return_station", "empty", "back", None, "station_menu", 3),
+    ("return_city", "station_menu", "back", None, "city_panel", 3),
 ])
-def test_persistent_source_stops_after_three_clicks(rig, stage, source, control, point, target):
+def test_persistent_source_respects_click_budget(rig, stage, source, control, point, target, max_clicks):
     rig.ui.state = source
     rig.ui.drops[stage] = 99
     with pytest.raises(flow.RubbishRecyclingError) as error:
         rig.engine.transition(stage, sources={source}, targets={target}, control=control, point=point,
                               retry_sec=1. if stage == "dismiss_reward" else 3.)
     assert error.value.code == flow._FAILURE_CODES[stage]
-    assert rig.ui.attempts[stage] == 3 and rig.clock.now <= 12.
+    assert rig.ui.attempts[stage] == max_clicks and rig.clock.now <= 12.
     assert error.value.detail["stage"] == stage
-    assert len(error.value.detail["clicks"][stage]) == 3
+    assert len(error.value.detail["clicks"][stage]) == max_clicks
 
 
 def test_disappeared_button_without_destination_is_not_success_or_retry(rig):
@@ -195,27 +196,28 @@ def test_unknown_start_never_clicks(rig):
     assert not rig.ui.clicks and rig.clock.now == pytest.approx(12.)
 
 
-def test_moving_station_anchor_is_not_ready_for_fixed_coordinate_click(rig):
-    rig.ui.on_observe = lambda: observation("city_panel", center=(600 + rig.ui.captures * 4, 460))
+def test_moving_city_panel_anchor_is_not_ready_for_fixed_coordinate_click(rig):
+    rig.ui.on_observe = lambda: observation("city_panel", center=(62 + rig.ui.captures * 4, 672))
     with pytest.raises(flow.RubbishRecyclingError):
         rig.engine.run()
     assert not rig.ui.clicks
 
 
 def test_current_button_center_is_used_after_a_dropped_click(rig):
-    rig.ui.state = "station_menu"
-    rig.ui.drops["enter_recycle"] = 1
+    rig.ui.state = "has_rubbish"
+    rig.ui.drops["recycle_all"] = 1
+    rig.ui.direct_empty = True
     original_click = rig.ui.click
-    moved = (995, 340)
+    moved = (1125, 124)
 
     def observe(**kwargs):
-        center = moved if rig.ui.clicks else POINTS["entry"]
+        center = moved if rig.ui.clicks else POINTS["enabled"]
         return observation(rig.ui.state, center=center)
 
     def click(*, x, y):
         if rig.ui.clicks:
             assert (x, y) == moved
-            original_click(x=POINTS["entry"][0], y=POINTS["entry"][1])
+            original_click(x=POINTS["enabled"][0], y=POINTS["enabled"][1])
         else:
             original_click(x=x, y=y)
 
@@ -224,9 +226,9 @@ def test_current_button_center_is_used_after_a_dropped_click(rig):
     rig.engine.vision = object()
     from unittest.mock import patch
     with patch.object(flow, "observe_recycling_page", observe):
-        result = rig.engine.transition("enter_recycle", sources={"station_menu"},
-                                       targets={"has_rubbish"}, control="entry")
-    assert result["state"] == "has_rubbish"
+        result = rig.engine.transition("recycle_all", sources={"has_rubbish"},
+                                       targets={"empty"}, control="enabled")
+    assert result["state"] == "empty"
     assert result["clicks"][-1]["x"] == moved[0]
 
 
@@ -306,11 +308,17 @@ def test_return_stops_if_first_back_already_reaches_city(rig):
     assert not rig.ui.attempts["return_city"]
 
 
-def test_direct_empty_confirmation_does_not_invent_reward_overlay(rig):
+def test_transient_empty_on_entry_does_not_skip_recycling(rig):
+    def transient_empty():
+        if rig.ui.clicks and rig.ui.clicks[-1][0] == "enter_recycle":
+            if rig.clock.now - rig.ui.clicks[-1][3] < 2.0:
+                return observation("empty")
+    rig.ui.on_observe = transient_empty
     rig.ui.direct_empty = True
     result = rig.engine.run()
     assert result["status"] == "sold" and result["reward_overlay_seen"] is False
     assert result["reward"] is None and not rig.ui.attempts["dismiss_reward"]
+    assert rig.ui.attempts["enter_recycle"] == rig.ui.attempts["recycle_all"] == 1
 
 
 def test_flow_deadline_takes_priority_over_stage_deadline(rig):
@@ -344,7 +352,12 @@ def test_freight_hook_rejects_unconfirmed_recycling_result(monkeypatch, field, v
               "returned_city_panel": {"confirmation": "observed"}}
     result[field] = value
     async def tracked(function, **kwargs):
-        return {} if function is trade.resonance_pc_open_city_panel_from_main else result
+        if function is trade._open_city_panel_from_main:
+            assert kwargs["identify_city"] is False
+            return {"success": True, "page_state": "city_panel"}
+        assert function is trade._execute_rubbish_recycling_from_city_panel
+        assert kwargs["city_panel_confirmed"] is True
+        return result
     monkeypatch.setattr(trade, "tracked_to_thread", tracked)
     monkeypatch.setattr(trade, "_check_trade_cancelled", lambda: None)
     monkeypatch.setattr(trade, "observe_operation", lambda *args, **kwargs: None)

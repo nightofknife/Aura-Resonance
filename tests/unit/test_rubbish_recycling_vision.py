@@ -12,7 +12,6 @@ from plans.resonance_pc.src.actions import _rubbish_recycling_vision as recyclin
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/rubbish_recycling"
 CITY_KEY = "farstar_bridge"
-STATION = {"x": 610, "y": 520}
 
 
 def hit(found=False, **changes):
@@ -43,19 +42,10 @@ class Vision:
         return result
 
 
-@pytest.fixture
-def city_probe(monkeypatch):
-    def probe(*, app, vision, check_cancelled, source_image):
-        vision.sources.append(source_image)
-        return {"found": True, "city_key": CITY_KEY, "confidence": .99}
-    monkeypatch.setattr(recycling.city_vision, "probe_city", probe)
-
-
-def observe(vision=None, app=None, **options):
+def observe(vision=None, app=None, *, city_key=CITY_KEY, check_cancelled=lambda: None):
     return recycling.observe_recycling_page(
-        app=app or App(), vision=vision or Vision(), city_key=CITY_KEY,
-        station_point=options.pop("station_point", STATION),
-        check_cancelled=options.pop("check_cancelled", lambda: None), **options)
+        app=app or App(), vision=vision or Vision(), city_key=city_key,
+        check_cancelled=check_cancelled)
 
 
 @pytest.mark.parametrize("present,state", [
@@ -63,53 +53,47 @@ def observe(vision=None, app=None, **options):
     (("recycle_all_enabled.png",), "has_rubbish"),
     (("no_rubbish_disabled.png",), "empty"),
     (("reward_obtained_title.png", "result_exit.png"), "reward"),
-    (("back.png", "station_label.png"), "city_panel"),
+    (("back.png", "panel_reputation.png"), "city_panel"),
 ])
-def test_positive_page_evidence_selects_state_and_native_coordinates(city_probe, present, state):
+def test_positive_page_evidence_selects_state_and_native_coordinates(present, state):
     result = observe(Vision(*present))
     assert result["state"] == state
     x, y, _, _ = result["match"]["region"]
     assert result["match"]["center"] == [x + 20, y + 20]
 
 
-def test_reward_overlay_wins_over_clickable_underlying_page(city_probe):
+def test_reward_overlay_wins_over_clickable_underlying_page():
     result = observe(Vision("reward_obtained_title.png", "result_exit.png", "entry.png",
-                            "recycle_all_enabled.png", "station_label.png", "back.png"))
+                            "recycle_all_enabled.png", "panel_reputation.png", "back.png"))
     assert result["state"] == "reward"
     assert result["evidence"]["enabled"]["reason"] == "not_observed"
-    assert result["evidence"]["city"]["reason"] == "not_observed"
+    assert result["evidence"]["city_panel"]["reason"] == "not_observed"
 
 
 @pytest.mark.parametrize("anchor", ["reward_obtained_title.png", "result_exit.png"])
-def test_partial_reward_prevents_clicking_underlying_controls(city_probe, anchor):
+def test_partial_reward_prevents_clicking_underlying_controls(anchor):
     result = observe(Vision(anchor, "entry.png", "recycle_all_enabled.png"))
     assert result["state"] == "unknown"
     assert result["reason"] == "partial_reward_overlay"
     assert result["match"] is None
 
 
-def test_conflicting_recycle_buttons_are_unknown_even_if_menu_is_visible(city_probe):
+def test_conflicting_recycle_buttons_are_unknown_even_if_menu_is_visible():
     result = observe(Vision("recycle_all_enabled.png", "no_rubbish_disabled.png", "entry.png"))
     assert result["state"] == "unknown"
     assert result["reason"] == "conflicting_recycle_controls"
 
 
-@pytest.mark.parametrize("present", [(), ("back.png",), ("station_label.png",)])
-def test_city_badge_needs_both_back_and_station_label(city_probe, present):
+@pytest.mark.parametrize("present", [(), ("back.png",), ("panel_reputation.png",)])
+def test_city_panel_needs_both_back_and_reputation(present):
     assert observe(Vision(*present))["state"] == "unknown"
 
 
-@pytest.mark.parametrize("city", [{"found": False}, {"found": True, "city_key": "wilderness_station"}])
-def test_city_must_be_present_and_expected(monkeypatch, city):
-    monkeypatch.setattr(recycling.city_vision, "probe_city", lambda **options: city)
-    assert observe(Vision("back.png", "station_label.png"))["state"] == "unknown"
-
-
-def test_all_evidence_uses_one_capture_and_views_of_the_same_frame(city_probe):
-    app, vision = App(), Vision("back.png", "station_label.png")
+def test_all_evidence_uses_one_capture_and_views_of_the_same_frame():
+    app, vision = App(), Vision("back.png", "panel_reputation.png")
     assert observe(vision, app)["state"] == "city_panel"
     assert app.captures == [(0, 0, 1280, 720)]
-    assert len(vision.sources) == 8
+    assert len(vision.sources) == 7
     assert all(np.shares_memory(source, app.image) for source in vision.sources)
 
 
@@ -144,17 +128,11 @@ def test_matcher_failure_is_not_permission_to_click(result):
 
 
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")])
-def test_nonfinite_control_score_is_technical_failure(score):
+@pytest.mark.parametrize("template", ["entry.png", "panel_reputation.png"])
+def test_nonfinite_control_score_is_technical_failure(score, template):
     with pytest.raises(recycling.RubbishRecyclingVisionError) as caught:
-        observe(Vision(overrides={"entry.png": hit(confidence=score)}))
+        observe(Vision(overrides={template: hit(confidence=score)}))
     assert caught.value.code == "rubbish_template_matching_failed"
-
-
-@pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")])
-def test_masked_station_nonfinite_score_cannot_confirm_city(city_probe, score):
-    result = observe(Vision("back.png", overrides={"station_label.png": hit(confidence=score)}))
-    assert result["state"] == "unknown"
-    assert result["reason"] == "station_label_unconfirmed"
 
 
 @pytest.mark.parametrize("point", [None, (1,), (True, 20), (np.bool_(True), 20),
@@ -164,14 +142,6 @@ def test_found_control_with_invalid_coordinate_is_technical_failure(point):
     with pytest.raises(recycling.RubbishRecyclingVisionError) as caught:
         observe(Vision(overrides={"entry.png": hit(True, center_point=point)}))
     assert caught.value.code == "rubbish_template_matching_failed"
-
-
-@pytest.mark.parametrize("point", [{}, {"x": -1, "y": 520}, {"x": 1280, "y": 520},
-                                    {"x": 610, "y": float("nan")}])
-def test_invalid_station_configuration_fails_before_city_can_be_confirmed(city_probe, point):
-    with pytest.raises(recycling.RubbishRecyclingVisionError) as caught:
-        observe(Vision("back.png"), station_point=point)
-    assert caught.value.code == "rubbish_station_point_invalid"
 
 
 def test_cancellation_propagates_without_becoming_technical_failure():
@@ -188,32 +158,29 @@ def load_rgb(path):
                         cv2.COLOR_BGR2RGB)
 
 
-def test_actual_user_city_screenshot_identifies_city_and_station_without_entering_station():
+def test_actual_user_city_screenshot_confirms_city_panel():
     app = App(load_rgb(FIXTURES / "farstar_bridge_city.png"))
     result = observe(VisionService(), app)
     assert result["state"] == "city_panel", result
-    assert result["evidence"]["city"]["city_key"] == CITY_KEY
-    assert result["evidence"]["station_label"]["found"] is True
+    assert result["city_key"] == CITY_KEY
+    assert result["evidence"]["city_panel"]["found"] is True
     assert result["evidence"]["entry"]["found"] is False
     assert app.captures == [(0, 0, 1280, 720)]
 
 
-def test_actual_city_with_station_title_obscured_is_not_ready_to_click():
+def test_actual_city_panel_is_confirmed_with_station_title_obscured():
     image = load_rgb(FIXTURES / "farstar_bridge_city.png")
     image[448:472, 562:688] = 0
     result = observe(VisionService(), App(image))
-    assert result["state"] == "unknown", result
-    assert result["evidence"]["city"]["city_key"] == CITY_KEY
-    assert result["evidence"]["station_label"]["found"] is not True
+    assert result["state"] == "city_panel", result
+    assert result["evidence"]["city_panel"]["found"] is True
 
 
-def test_actual_city_for_wrong_destination_cannot_authorize_station_click():
-    result = recycling.observe_recycling_page(
-        app=App(load_rgb(FIXTURES / "farstar_bridge_city.png")), vision=VisionService(),
-        city_key="wilderness_station", station_point=STATION, check_cancelled=lambda: None)
-    assert result["state"] == "unknown"
-    assert result["reason"] == "unexpected_city"
-    assert result["evidence"]["city"]["city_key"] == CITY_KEY
+def test_city_panel_detection_keeps_city_from_route_context():
+    app = App(load_rgb(FIXTURES / "farstar_bridge_city.png"))
+    result = observe(VisionService(), app, city_key="wilderness_station")
+    assert result["state"] == "city_panel", result
+    assert result["city_key"] == "wilderness_station"
 
 
 @pytest.mark.parametrize("complete", [True, False])
@@ -230,7 +197,7 @@ def test_real_reward_anchors_override_actual_underlying_city(complete):
     result = observe(VisionService(), App(image))
     assert result["state"] == ("reward" if complete else "unknown"), result
     assert result["reason"] == ("reward_anchors_confirmed" if complete else "partial_reward_overlay")
-    assert result["evidence"]["city"]["reason"] == "not_observed"
+    assert result["evidence"]["city_panel"]["reason"] == "not_observed"
 
 
 @pytest.mark.parametrize("template,region,state", [

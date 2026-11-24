@@ -1,10 +1,4 @@
-"""Single-frame evidence for rubbish recycling; this module never sends input.
-
-The station title is cropped from the user's 1280x720 farstar-bridge screenshot.
-Its text mask excludes most scenery. Sharing that title with wilderness station
-uses the configured common shop name, rather than assuming a shared portrait.
-Neither the cross-city title nor the reused reward layout has live calibration.
-"""
+"""Single-frame page evidence for rubbish recycling, independent of city identity."""
 from __future__ import annotations
 
 import math
@@ -14,8 +8,7 @@ from typing import Any, Callable, Mapping
 import cv2
 import numpy as np
 
-from . import _city_panel_vision as city_vision
-from ._navigation_templates import GLOBAL_BACK
+from ._navigation_templates import CITY_PANEL_REPUTATION, GLOBAL_BACK
 
 
 _PLAN_ROOT = Path(__file__).resolve().parents[2]
@@ -44,19 +37,17 @@ class RubbishRecyclingVisionError(RuntimeError):
 def _match(
     *, image: np.ndarray, vision: Any, template: str, region: tuple[int, int, int, int],
     check_cancelled: Callable[[], None], threshold: float = _CONTROL_THRESHOLD,
-    mask: str | None = None, match_method: int = cv2.TM_CCOEFF_NORMED,
+    match_method: int = cv2.TM_CCOEFF_NORMED,
     use_grayscale: bool = True, preprocess: str = "none",
-    non_finite_is_unknown: bool = False,
 ) -> dict:
     check_cancelled()
     x, y, width, height = region
     try:
-        options = {"mask_image": str(_PLAN_ROOT / mask)} if mask is not None else {}
         hit = vision.find_template(
             source_image=image[y:y + height, x:x + width],
             template_image=str(_PLAN_ROOT / template), threshold=threshold,
             use_grayscale=use_grayscale, match_method=match_method,
-            preprocess=preprocess, **options,
+            preprocess=preprocess,
         )
         found = getattr(hit, "found", None)
         confidence = float(getattr(hit, "confidence", 0.0))
@@ -66,12 +57,7 @@ def _match(
                 or (debug or {}).get("error")):
             raise ValueError("Unusable template matching result")
         if not math.isfinite(confidence):
-            if not non_finite_is_unknown:
-                raise ValueError("Non-finite template matching confidence")
-            check_cancelled()
-            return {"found": None, "confidence": None, "center": None,
-                    "reason": "non_finite_score", "template": template,
-                    "region": list(region)}
+            raise ValueError("Non-finite template matching confidence")
         center = None
         if found:
             point = getattr(hit, "center_point", None)
@@ -92,25 +78,8 @@ def _match(
             "template": template, "region": list(region)}
 
 
-def _station_region(station_point: Mapping) -> tuple[int, int, int, int]:
-    try:
-        raw_x, raw_y = float(station_point["x"]), float(station_point["y"])
-        if not (math.isfinite(raw_x) and math.isfinite(raw_y)
-                and 0 <= raw_x < 1280 and 0 <= raw_y < 720):
-            raise ValueError("Station point is outside the native frame")
-        x, y = int(raw_x), int(raw_y)
-        left, top = max(0, x - 120), max(0, y - 110)
-        right, bottom = min(1280, x + 120), min(720, y + 30)
-        return left, top, right - left, bottom - top
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise RubbishRecyclingVisionError(
-            "rubbish_station_point_invalid", "Invalid rubbish station location",
-            {"cause": str(exc)},
-        ) from exc
-
-
 def observe_recycling_page(
-    *, app: Any, vision: Any, city_key: str, station_point: Mapping,
+    *, app: Any, vision: Any, city_key: str,
     check_cancelled: Callable[[], None],
 ) -> dict:
     """Classify one frame using positive evidence, with overlays taking priority.
@@ -141,7 +110,7 @@ def observe_recycling_page(
 
     evidence = {
         key: {"found": None, "confidence": None, "center": None, "reason": "not_observed"}
-        for key in ("city", "station_label", "entry", "enabled", "empty",
+        for key in ("city_panel", "entry", "enabled", "empty",
                     "reward_title", "reward_exit", "back")
     }
 
@@ -168,7 +137,7 @@ def observe_recycling_page(
     if title or exit_prompt:
         return result(reason="partial_reward_overlay")
 
-    # Do not inspect masked city artwork through a recognized upper page.
+    # Recycling and station controls take priority over city panel evidence.
     evidence["enabled"] = match(_RECYCLE_ALL_TEMPLATE, _STATE_REGION)
     evidence["empty"] = match(_NO_RUBBISH_TEMPLATE, _STATE_REGION)
     enabled, empty = evidence["enabled"]["found"] is True, evidence["empty"]["found"] is True
@@ -183,36 +152,11 @@ def observe_recycling_page(
     if evidence["entry"]["found"] is True:
         return result("station_menu", "station_menu_entry", evidence["entry"])
 
-    x, y, width, height = city_vision.CITY_REGION
-    try:
-        city = city_vision.probe_city(
-            app=app, vision=vision, check_cancelled=check_cancelled,
-            source_image=image[y:y + height, x:x + width],
-        )
-    except city_vision.CityPanelVisionError as exc:
-        raise RubbishRecyclingVisionError(exc.code, exc.message, exc.detail) from exc
-    except Exception as exc:
-        check_cancelled()
-        raise RubbishRecyclingVisionError(
-            "rubbish_city_observation_failed", "Unable to observe city badge",
-            {"cause": str(exc)},
-        ) from exc
-    city = {**city, "center": [x + width // 2, y + height // 2]
-            if city.get("found") is True else None}
-    evidence["city"] = city
-    check_cancelled()
-    if city.get("found") is not True:
-        return result(reason="city_not_confirmed")
-    if city.get("city_key") != city_key:
-        return result(reason="unexpected_city")
-    evidence["station_label"] = match(
-        "templates/recycling/controls/station_label.png", _station_region(station_point),
-        mask="templates/recycling/controls/station_label_mask.png",
-        match_method=cv2.TM_CCORR_NORMED, preprocess="edge", non_finite_is_unknown=True,
+    panel = CITY_PANEL_REPUTATION
+    evidence["city_panel"] = match(
+        panel.path, panel.roi, **panel.match_kwargs(),
     )
-    if evidence["station_label"]["found"] is None:
-        return result(reason="station_label_unconfirmed")
-    if (evidence["station_label"]["found"] is True
+    if (evidence["city_panel"]["found"] is True
             and evidence["back"]["found"] is True):
-        return result("city_panel", "city_and_station_label", evidence["station_label"])
-    return result(reason="city_station_controls_not_confirmed")
+        return result("city_panel", "city_panel_controls_confirmed", evidence["city_panel"])
+    return result(reason="city_panel_controls_not_confirmed")
