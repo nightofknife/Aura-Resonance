@@ -13,7 +13,9 @@ import cv2
 
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
+from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
+from ....aura_base.src.services.interaction_service import InteractionError
 from ....aura_base.src.services.observation_service import CaptureError, Frame, ObservationService
 from ._cancellable_wait import sleep_before_deadline
 from ._recovery_assets import load_plan_image, read_layout_json
@@ -23,7 +25,7 @@ from ._bento_consumption_store import load_cached_inventory, record_portion
 from ._bento_target_locator import find_target_on_frame
 from .love_bento_pc_actions import LoveBentoScanner, load_love_bento_catalog
 from .player_recovery_pc_actions import RecoveryReader, load_recovery_layout, _roi
-from .player_data_pc_actions import _CLICK_PROFILE
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 from .passenger_pc_actions import _MAIN_SCREEN_TEMPLATE, _MAIN_SCREEN_REGION
 from .runtime_preflight_pc_actions import resonance_pc_require_client_resolution
 
@@ -217,34 +219,22 @@ class BentoConsumptionSession:
     def enter(self):
         self.require_main()
         self.stage = "enter_profile"
-        started = time.monotonic()
-        deadline = min(self.deadline, started + self.layout["timeout_sec"])
-        clicks = 0
-        next_click = started
-
-        def profile_opened():
-            nonlocal clicks, next_click
+        self.guard()
+        scope = OperationScope(max(0., self.deadline - time.monotonic()),
+                               parent=current_operation_scope(), target=getattr(self.app, "target_runtime", None),
+                               cancel_check=self.guard)
+        try:
+            self.page = "unknown"
+            with scope.activate():
+                open_station_page("个人资料", app=self.app, vision=self.vision, check_start=True)
+        except (StationMainNavigationError, OperationTimeout) as exc:
             self.guard()
-            frame = self.snapshot()
-            if self.reader.is_page("profile", frame=frame):
-                return True
-            if clicks < 3 and time.monotonic() >= next_click and self.match("main", frame=frame)["found"]:
-                # A late opening between probes must not be toggled closed by a retry.
-                if self.reader.is_page("profile"):
-                    return True
-                if time.monotonic() >= deadline:
-                    return False
-                self.click(_CLICK_PROFILE)
-                self.page = "unknown"
-                clicks += 1
-                next_click = time.monotonic() + self.reader.layout["click_interval_sec"]
-                logger.info("[BentoConsumption] phase=profile_entry_clicked attempt=%s/3 elapsed_sec=%.3f",
-                            clicks, time.monotonic() - started)
-            return False
-
-        self.wait(profile_opened, "profile")
-        logger.info("[BentoConsumption] phase=profile_entry_confirmed clicks=%s elapsed_sec=%.3f",
-                    clicks, time.monotonic() - started)
+            raise BentoConsumptionError("bento_transition_timeout", "未能确认个人资料页。") from exc
+        except InteractionError as exc:
+            self.guard()
+            if isinstance(exc.__cause__, BentoConsumptionError):
+                raise exc.__cause__ from None
+            raise
         self.reader.set_page("profile")
         self.reader.move("profile", "fatigue_recovery", "fatigue_plus")
         self.reader.move("fatigue_recovery", "bento_cabinet", "bento_button")

@@ -32,7 +32,7 @@ from ....aura_base.src.services._target_identity import read_target_identity
 from ._bounded_observation import ObservationBudget, wait_for_observation
 from ._recognition_failure import with_template_failure
 from ._template_observation import capture_template_frame, observe_template
-from ._navigation_templates import GLOBAL_BACK, GLOBAL_CITY_MAIN
+from ._navigation_templates import EXCHANGE_MENU, GLOBAL_BACK, GLOBAL_CITY_MAIN
 from ._cancellable_wait import async_sleep_slices, sleep_slices
 
 from ..services.city_shop_data_pc_service import ResonancePcCityShopDataService, CityShopDataError
@@ -57,7 +57,8 @@ from ._operation_progress import (
 )
 from ._depart_button_vision import DepartButtonError, probe_depart_button, wait_depart_button
 from ._city_panel_vision import CityPanelVisionError, open_city_panel, wait_city
-from ._city_shop_entry import CityShopEntryError, enter_city_shop, probe_menu_template, valid_probe
+from ._city_shop_entry import CityShopEntryError, probe_menu_template, valid_probe
+from .city_shop_navigation_pc_actions import enter_resolved_city_shop
 from .market_data_pc_actions import _market_request_options, resonance_pc_market_refresh
 from .purchase_book_pc_actions import resonance_pc_use_purchase_books
 from .rubbish_recycling_pc_actions import (
@@ -371,9 +372,9 @@ _CITY_MAIN_BUTTON_REGION = list(GLOBAL_CITY_MAIN.roi)
 _NAV_BUTTON_THRESHOLD = GLOBAL_BACK.threshold
 _NAV_BUTTON_TIMEOUT_SEC = 3.0
 _NAV_BUTTON_INTERVAL_SEC = 0.4
-_SHOP_MENU_READY_TEMPLATE = "templates/commerce/trade/shop/menu_ready.png"
-_SHOP_MENU_READY_REGION = [720, 350, 220, 120]
-_SHOP_MENU_READY_THRESHOLD = 0.86
+_SHOP_MENU_READY_TEMPLATE = EXCHANGE_MENU.path
+_SHOP_MENU_READY_REGION = list(EXCHANGE_MENU.roi)
+_SHOP_MENU_READY_THRESHOLD = EXCHANGE_MENU.threshold
 _SHOP_MENU_READY_TIMEOUT_SEC = 15.0
 _SHOP_MENU_READY_INTERVAL_SEC = 0.3
 _SHOP_MENU_READY_STABLE_MATCHES = 2
@@ -599,15 +600,19 @@ def _probe_shop_menu(app: Any, vision: Any) -> Dict[str, Any]:
 def _enter_exchange(*, city_name: str, app: Any, vision: Any, city_shop_data: Any) -> Dict[str, Any]:
     point = city_shop_data.resolve_shop_point(city_name=city_name, shop_name="交易所")
     try:
-        ready = enter_city_shop(
-            app=app, vision=vision, point=point, entry_type="exchange", page_state="shop_page",
-            target_probe=lambda: _probe_shop_menu(app, vision),
-            click=lambda: app.click(x=int(point["x"]), y=int(point["y"])),
-            check_cancelled=_check_trade_cancelled,
+        entry = enter_resolved_city_shop(
+            point, app=app, vision=vision, check_cancelled=_check_trade_cancelled,
         )
     except CityShopEntryError as exc:
-        code = "shop_menu_not_ready" if exc.code == "city_shop_entry_timeout" else exc.code
-        _raise_error(code, exc.message, exc.detail)
+        if exc.code == "city_shop_entry_timeout":
+            _raise_error("shop_menu_not_ready", exc.message, {
+                **exc.detail, **recognition_failure("进入交易所", "交易所菜单", "template", "timeout",
+                                                    timeout_sec=exc.detail.get("timeout_sec")),
+            })
+        _raise_error(exc.code, exc.message, exc.detail)
+    match = entry["last_observation"]["menu"]
+    ready = {**entry, "entry_type": "exchange", "point": point,
+             "stable_matches": _SHOP_MENU_READY_STABLE_MATCHES, "match": match, "last_match": match}
     return {"success": True, "page_state": "shop_page", "click": point, "menu_ready": ready}
 
 

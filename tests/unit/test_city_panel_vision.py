@@ -115,11 +115,6 @@ def wait(vision=None, app=None, **options):
     return city.wait_city(app=app or App(), vision=vision or Vision(), check_cancelled=lambda: None, **options)
 
 
-def open_panel(vision=None, app=None, **options):
-    return city.open_city_panel(app=app or App(), vision=vision or Vision(),
-                                check_cancelled=lambda: None, **options)
-
-
 def test_highest_only_wins_even_when_runner_up_is_almost_equal():
     rows = city.load_templates()[0]
     result = probe(Vision([batch(**{"0": .600, "1": .599})]))
@@ -274,48 +269,6 @@ def test_invalid_timeout_rejected_before_capture(function, timeout):
     assert not app.captures and not app.clicks
 
 
-def test_already_in_city_panel_never_probes_entry_or_clicks(clock):
-    app, vision = App(), Vision([batch(**{"3": .7})])
-    result = open_panel(vision, app)
-    assert result["skipped"] and result["click_attempts"] == 0 and result["city"]["success"]
-    assert not app.clicks and not vision.single_calls and clock.now == .15
-
-
-def test_first_entry_click_then_two_city_matches_no_three_second_sleep(clock):
-    app, vision = App(), Vision([batch(), batch(**{"3": .7}), batch(**{"3": .7})])
-    result = open_panel(vision, app)
-    assert result["success"] and not result["skipped"] and result["click_attempts"] == 1
-    assert app.clicks == [{"x": 1050, "y": 480}]
-    assert clock.sleeps == [.3, .15] and result["city"]["elapsed_ms"] == 450
-
-
-def test_four_total_clicks_are_guarded_by_fresh_entry_evidence_and_two_second_spacing(clock):
-    app, vision = App(), Vision()
-    click_times = []
-    app.on_click = lambda: click_times.append(clock.now)
-    with pytest.raises(city.CityPanelVisionError) as error:
-        open_panel(vision, app, timeout_sec=10)
-    assert error.value.code == "open_city_panel_failed" and error.value.detail["click_attempts"] == 4
-    assert len(app.clicks) == len(vision.single_calls) == 4
-    assert click_times[0] == 0 and all(b-a >= 2. for a, b in zip(click_times, click_times[1:]))
-    assert all(options["source_image"].shape == (70, 250, 3) for options in vision.single_calls)
-
-
-def test_unknown_screen_never_blind_clicks():
-    app, vision = App(), Vision(entries=[hit(.1, found=False)])
-    with pytest.raises(city.CityPanelVisionError):
-        open_panel(vision, app, timeout_sec=.6)
-    assert not app.clicks and len(vision.single_calls) > 1
-
-
-def test_old_entry_match_is_not_reused_after_it_disappears():
-    app, vision = App(), Vision(entries=[hit(.99), hit(.1, found=False)])
-    with pytest.raises(city.CityPanelVisionError) as error:
-        open_panel(vision, app, timeout_sec=5)
-    assert error.value.detail["click_attempts"] == 1 and len(app.clicks) == 1
-    assert len(vision.single_calls) > 1
-
-
 @pytest.mark.parametrize("target", ["city", "visit"])
 @pytest.mark.parametrize("cancel_at", [1, 2, 3, 4])
 def test_probe_cancellation_before_and_after_capture_and_match(target, cancel_at):
@@ -332,25 +285,6 @@ def test_probe_cancellation_before_and_after_capture_and_match(target, cancel_at
         assert not app.captures
     if cancel_at <= 3:
         assert not vision.batch_calls and not vision.single_calls
-
-
-@pytest.mark.parametrize("when, expected_clicks", [("entry_match", 0), ("click", 1), ("sleep", 1)])
-def test_open_cancellation_at_match_click_or_sleep_never_retries(clock, when, expected_clicks):
-    state, app, vision = {"cancelled": False}, App(), Vision()
-    def cancel():
-        state["cancelled"] = True
-    def check():
-        if state["cancelled"]:
-            raise asyncio.CancelledError()
-    if when == "entry_match":
-        vision.on_single = cancel
-    elif when == "click":
-        app.on_click = cancel
-    else:
-        clock.on_sleep = cancel
-    with pytest.raises(asyncio.CancelledError):
-        city.open_city_panel(app=app, vision=vision, check_cancelled=check)
-    assert len(app.clicks) == expected_clicks
 
 
 @pytest.mark.parametrize("function", [trade.resonance_pc_open_city_panel_from_main,

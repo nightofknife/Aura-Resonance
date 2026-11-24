@@ -26,13 +26,13 @@ def _environment(tmp_path, monkeypatch):
 
     class App:
         def click(self, **kwargs):
-            assert kwargs == {"x": player._CLICK_PROFILE[0], "y": player._CLICK_PROFILE[1]}
+            assert kwargs == {"x": 150, "y": 655}
             events.append("open_profile")
 
     monkeypatch.setattr(player, "_wait_for_any_marker", lambda *a, **k: events.append("main"))
     monkeypatch.setattr(player, "_wait_for_profile_panel", lambda *a, **k: events.append("profile_ready"))
-    def open_profile(app, vision):
-        app.click(x=player._CLICK_PROFILE[0], y=player._CLICK_PROFILE[1])
+    def open_profile(app, vision, interaction):
+        app.click(x=150, y=655)
         events.append("profile_ready")
     monkeypatch.setattr(player, "_open_profile_panel", open_profile)
     monkeypatch.setattr(player, "_close_profile_panel_to_main", lambda *a, **k: events.append("close_profile"))

@@ -19,7 +19,8 @@ from packages.aura_core.observability.runtime_trace import log_event, log_poll
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.utils.task_errors import recognition_failure
 from ._city_panel_vision import CityPanelVisionError, VISIT_REGION, VISIT_THRESHOLD, probe_visit_entry
-from ._depart_button_vision import DepartButtonError, probe_depart_button, wait_depart_button, POLL_INTERVAL
+from ._depart_button_vision import DepartButtonError, wait_depart_button
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 from ._departure_fatigue_observation import read_departure_fatigue
 from ._operation_progress import observe_operation
 from ._cancellable_wait import sleep_slices
@@ -671,39 +672,15 @@ def _check_intercity_cancelled() -> None:
 
 
 def _open_intercity_map(app: Any, vision: Any) -> Dict[str, Any]:
-    """Click only a current departure hit, retrying only a still-visible button."""
     try:
-        ready = wait_depart_button(app=app, vision=vision, check_cancelled=_check_intercity_cancelled,
-                                  timeout_sec=3.0)
-        if not ready["confirmed"]:
-            _raise_error("depart_button_not_found", "Unable to confirm the departure button", ready)
-        match = ready["match"]
-        for attempt in (1, 2):
-            _check_intercity_cancelled()
-            app.click(x=int(match["center"][0]), y=int(match["center"][1]))
-            logger.info("[IntercityDeparture] phase=depart_clicked attempt=%s match=%s", attempt, match)
-            _sleep_with_cancel(1.0)
-            _check_intercity_cancelled()
-            present = absent = 0
-            for poll in range(5):
-                match = probe_depart_button(app=app, vision=vision, check_cancelled=_check_intercity_cancelled)
-                present = present+1 if match["found"] else 0
-                absent = absent+1 if not match["found"] else 0
-                if absent >= 2:
-                    # This is only a transition signal; the existing map selector
-                    # must still identify and select the actual destination.
-                    return {"transitioned": True, "click_attempts": attempt, "last_match": match}
-                if present >= 2:
-                    break
-                if poll < 4:
-                    _sleep_with_cancel(POLL_INTERVAL)
-                    _check_intercity_cancelled()
-            if present < 2:
-                break
-        _raise_error("depart_transition_unconfirmed", "Departure button did not leave the main screen",
-                     {"click_attempts": attempt, "last_match": match})
-    except DepartButtonError as exc:
-        _raise_error(exc.code, exc.message, exc.detail)
+        opened = open_station_page("城际地图", app=app, vision=vision,
+                                   cancel_check=_check_intercity_cancelled)
+    except StationMainNavigationError as exc:
+        if exc.code == "station_main_entry_not_found":
+            _raise_error("depart_button_not_found", "Unable to confirm the departure button", exc.detail)
+        _raise_error("depart_transition_unconfirmed", "Unable to confirm the intercity map", exc.detail)
+    return {"transitioned": True, "click_attempts": opened["click_attempts"],
+            "last_match": opened["last_observation"]}
 
 
 def _wait_for_marker_hit(

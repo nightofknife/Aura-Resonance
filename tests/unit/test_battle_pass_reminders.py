@@ -86,18 +86,22 @@ def test_nearly_flat_background_does_not_hide_the_reminder():
 def test_flow_processes_visible_reminders_using_only_clicks(monkeypatch, rows):
     # The app exposes no drag API. The old initial scroll would fail this run.
     flow = BattlePassRewardFlow(SimpleNamespace(), Replay(client_image("04_manual")), None)
-    main = SimpleNamespace(page_state="main", absent=lambda _key: False, present=lambda _key: True)
+    main = SimpleNamespace(page_state="main")
     pages = iter([main, *(SimpleNamespace(page_state="manual", reminders=rows[index:])
                           for index in range(len(rows) + 1))])
     monkeypatch.setattr(flow, "confirmed_page", lambda *_args, **_options: next(pages))
     calls = []
+    def open_page(target, **kwargs):
+        calls.append(("open_station_page", target))
+        return {"click_attempts": 1}
+    monkeypatch.setattr(_daily_reward_flow, "open_station_page", open_page)
     monkeypatch.setattr(flow, "transition", lambda stage, _source, _target, control: calls.append((stage, control)))
     monkeypatch.setattr(flow, "_collect", lambda kind: calls.append(("collect", kind)))
     monkeypatch.setattr(flow, "_confirm_reminder_cleared", lambda: calls.append(("cleared", flow.active_row)))
 
     result = flow.run()
 
-    expected = [("enter_passes", "main_entry_with_red")]
+    expected = [("open_station_page", "通行证")]
     for row in rows:
         expected.extend([("select_pass", reminder_control(row)), ("collect", "tasks"),
                          ("collect", "manual"), ("cleared", row)])
@@ -105,6 +109,8 @@ def test_flow_processes_visible_reminders_using_only_clicks(monkeypatch, rows):
     assert calls == expected
     assert result["passes_processed"] == len(rows)
     assert result["list_scrolls"] == 0
+    if not rows:
+        assert result["status"] == "nothing_to_claim" and result["returned_to_main"]
 
 
 def without_claim_button(image):
@@ -139,7 +145,7 @@ def test_manual_claim_without_overlay_continues_to_second_pass(
     second_manual_after_claim = without_claim_button(second_manual)
     second_manual_after_claim[150:175, 181:209] = 0
 
-    steps = [((871, 50), first_manual), ((708, 670), first_tasks)]
+    steps = [((870, 50), first_manual), ((708, 670), first_tasks)]
     if first_tasks_overlay:
         steps.extend([((1146, 670), client_image("01_mission_reward")),
                       ((500, 500), first_tasks_after_claim)])
@@ -164,7 +170,7 @@ def test_manual_claim_without_overlay_continues_to_second_pass(
         observation.image = image
         return True
 
-    app = SimpleNamespace(click=click)
+    app = SimpleNamespace(click=click, get_window_size=lambda: (1280, 720))
     with install_clock(monkeypatch, _daily_reward_flow):
         flow = BattlePassRewardFlow(app, observation, InteractionService(app, observation))
         result = flow.run()

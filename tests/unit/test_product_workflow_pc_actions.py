@@ -443,25 +443,31 @@ def test_actual_city_panel_capture_is_recognized_without_departure_button_or_inp
 
 
 def enter_services(monkeypatch, *, initial_city=None, fresh_city=None, overview=True, lookup_error=False):
+    from plans.resonance_pc.src.actions import city_shop_navigation_pc_actions as navigation
+
     clicks, lookups, sent = [], [], []
     monkeypatch.setattr(workflow, "resonance_pc_require_client_resolution", lambda **kwargs: None)
     monkeypatch.setattr(workflow, "wait_city", lambda **kwargs: deepcopy(CITY if initial_city is None else initial_city))
     fresh_city = {"found": True, "city_key": CITY["city_key"]} if fresh_city is None else fresh_city
     monkeypatch.setattr(workflow, "probe_city", lambda **kwargs: deepcopy(fresh_city))
-    monkeypatch.setattr(workflow, "PrisonWarehouseUi", lambda: SimpleNamespace(
-        probe=lambda *args, **kwargs: {"page": "overview" if overview else "unknown"}))
+    monkeypatch.setattr(navigation, "_probe_reforming_center", lambda *args, **kwargs: {
+        "valid": True, "found": overview, "page": "overview" if overview else "unknown",
+    })
+    monkeypatch.setattr(navigation, "_match", lambda *args, **kwargs: {"found": False})
 
     def resolve(**kwargs):
         lookups.append(kwargs)
         if lookup_error:
             raise ValueError("整顿中心 is not present in this city")
         assert kwargs == {"city_name": CITY["city_key"], "shop_name": "整顿中心"}
-        return {"x": 501, "y": 367}
+        return {"x": 501, "y": 367, "city_key": CITY["city_key"], "shop_key": "reforming_center"}
 
     def click(**point):
         assert point == {"x": 501, "y": 367}, "Only the city building entry may be clicked"
         clicks.append(point)
         return True
+
+    real_send = interaction_service.send_input
 
     def send(callback, **kwargs):
         assert isinstance(kwargs.get("session"), interaction_service.InputSession), (
@@ -469,16 +475,13 @@ def enter_services(monkeypatch, *, initial_city=None, fresh_city=None, overview=
         sent.append(kwargs)
         # Preserve the real frame/session/point validation and receipt path;
         # only the final app callback is fake and records a coordinate.
-        return interaction_service.send_input(callback, **kwargs)
+        return real_send(callback, **kwargs)
 
-    def confirm(observe, **kwargs):
-        assert kwargs["stable_scans"] == 2
-        value = observe()
-        return value if kwargs["accept"](value) else None
-
-    frame = Frame.from_image(np.zeros((720, 1280, 3), dtype=np.uint8))
-    interaction = SimpleNamespace(
-        observation=SimpleNamespace(capture=lambda **kwargs: frame), send_input=send, confirm=confirm)
+    monkeypatch.setattr(interaction_service, "send_input", send)
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    interaction = interaction_service.InteractionService(
+        observation=SimpleNamespace(capture=lambda **kwargs: Frame.from_image(image)),
+    )
     return SimpleNamespace(click=click), interaction, SimpleNamespace(resolve_shop_point=resolve), clicks, lookups, sent
 
 

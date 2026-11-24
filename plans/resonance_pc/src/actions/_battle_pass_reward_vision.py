@@ -14,7 +14,7 @@ from ._depart_button_vision import load_depart_profile
 from ._battle_pass_entries import read_reminders, read_selected_row, reminder_control, reminder_observation
 
 
-REQUIRED = ("main_entry_with_red", "manual_on", "manual_off", "tasks_on", "tasks_off",
+REQUIRED = ("manual_on", "manual_off", "tasks_on", "tasks_off",
             "tasks_claim_all", "manual_claim_all_red", "reward_title", "city_main", "pass_reminder")
 
 
@@ -41,7 +41,7 @@ class BattlePassRewardReader(DailyRewardReader):
             catalog = json.loads((PLAN / "data/meta/battle_pass_templates_pc.json").read_text(encoding="utf-8"))
             if catalog["schema_version"] != 1 or catalog["client_size"] != [1280, 720]:
                 raise ValueError("Unsupported battle-pass catalog")
-            if set(catalog["templates"]) != set(REQUIRED):
+            if set(catalog["templates"]) - {"main_entry_with_red"} != set(REQUIRED):
                 raise ValueError("Battle-pass catalog must contain only the approved flow controls")
             for key in REQUIRED:
                 profile = dict(catalog["templates"][key])
@@ -153,6 +153,5 @@ class BattlePassRewardReader(DailyRewardReader):
             return BattlePassPage(frame, "tasks" if tasks else "manual", hits,
                                   reminders, read_selected_row(frame))
         if match("main_screen"):
-            match("main_entry_with_red")
             return BattlePassPage(frame, "main", hits)
         return BattlePassPage(frame, "unknown", hits)

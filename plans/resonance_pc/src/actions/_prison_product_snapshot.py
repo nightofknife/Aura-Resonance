@@ -13,15 +13,16 @@ import cv2
 from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 from packages.aura_core.utils.exceptions import StopTaskException
 from ....aura_base.src.services.interaction_service import InteractionError
-from ._navigation_templates import PROFILE_MENU
+from ._navigation_templates import PRISON_DAILY_REPORT_HEADER, PROFILE_MENU
 from ._prison_warehouse_ledger import normalize_request
 from ._prison_warehouse_runtime import PLAN_ROOT, WarehouseTransferRuntime, WarehouseTransferError
 from .prison_warehouse_pc_actions import _check_cancelled
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 
 
-_DAILY_REPORT_HEADER = "templates/workshop/warehouse/controls/prison_daily_report_header.png"
-_DAILY_REPORT_ROI = (248, 0, 325, 63)
-_DAILY_REPORT_THRESHOLD = .92
+_DAILY_REPORT_HEADER = PRISON_DAILY_REPORT_HEADER.path
+_DAILY_REPORT_ROI = PRISON_DAILY_REPORT_HEADER.roi
+_DAILY_REPORT_THRESHOLD = PRISON_DAILY_REPORT_HEADER.threshold
 # The native PrisonerRelease Btn_Close fills the modal. Click the dimmed margin
 # away from the paper and the overview controls.
 _DAILY_REPORT_CLOSE = (100, 360)
@@ -106,7 +107,6 @@ class VisiblePrisonProductRuntime(WarehouseTransferRuntime):
             main = self._match(bgr, "templates/navigation/global/train_maintenance.png", (920, 640, 80, 65), .86)
             if main["found"]:
                 view["page"] = "main"
-                view["controls"]["profile_avatar"] = {"valid": True, "found": True, "point": [150, 655]}
         return view
 
     def _dismiss_daily_report(self):
@@ -138,10 +138,17 @@ class VisiblePrisonProductRuntime(WarehouseTransferRuntime):
             result = visible_snapshot(view, self.request["goods_ids"])
             self._transition("return_overview", lambda v: v.get("page") == "overview",
                              lambda v: v.get("page") == "warehouse", "back")
-            self._transition("return_profile_or_main", lambda v: v.get("page") in {"profile", "main"},
-                             lambda v: v.get("page") == "overview", "back")
-            self._transition("restore_profile", lambda v: v.get("page") == "profile",
-                             lambda v: v.get("page") == "main", "profile_avatar")
+            returned = self._transition("return_profile_or_main", lambda v: v.get("page") in {"profile", "main"},
+                                        lambda v: v.get("page") == "overview", "back")
+            restored = {"receipts": []}
+            if returned == "main":
+                try:
+                    restored = open_station_page("个人资料", app=self.app, interaction=self.interaction, check_start=True)
+                except StationMainNavigationError as exc:
+                    raise WarehouseTransferError("restore_profile_unconfirmed", navigation=exc.to_dict()) from exc
+            receipts = restored["receipts"]
+            self.trace.append({"stage": "restore_profile", "confirmed": True, "receipts": receipts,
+                               "source_loss_latched": bool(receipts)})
             result["returned_to_profile"] = True
             result["results"] = self.trace
             return result

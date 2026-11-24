@@ -3,9 +3,14 @@ from collections import Counter
 from types import SimpleNamespace
 import asyncio
 
+import numpy as np
 import pytest
 
+from packages.aura_core.scheduler.operation_scope import OperationScope
+from plans.aura_base.src.platform.contracts import CaptureResult
+from plans.aura_base.src.services import interaction_service
 from plans.resonance_pc.src.actions import _rubbish_recycling_flow as flow
+from plans.resonance_pc.src.actions import city_shop_navigation_pc_actions as navigation
 from plans.resonance_pc.src.actions import rubbish_recycling_pc_actions as rubbish
 from plans.resonance_pc.src.actions import city_trade_flow_pc_actions as trade
 
@@ -21,7 +26,7 @@ CONTROLS = {"city_panel": "city_panel", "station_menu": "entry",
 
 def observation(state, *, center=None, controls=None):
     evidence = {name: {"found": False, "confidence": .1, "center": None}
-                for name in POINTS}
+                for name in (*POINTS, "reward_title")}
     if state in CONTROLS:
         name = CONTROLS[state]
         evidence[name] = {"found": True, "confidence": .96,
@@ -61,6 +66,11 @@ class UI:
         self.captures = 0
         self.on_observe = self.on_click = None
         self.cancelled = False
+        self.first_landing = "station_menu"
+        self.image = np.zeros((720, 1280, 3), np.uint8)
+
+    def capture(self, *, rect):
+        return CaptureResult(True, self.image, relative_rect=rect, captured_at_monotonic=self.clock.now + .001)
 
     def observe(self, **kwargs):
         self.captures += 1
@@ -72,7 +82,7 @@ class UI:
 
     def click(self, *, x, y):
         if self.state == "city_panel" and (x, y) == (610, 520):
-            stage, target = "open_station", "station_menu"
+            stage, target = "open_station", self.first_landing
         elif self.state == "station_menu" and (x, y) == POINTS["entry"]:
             stage, target = "enter_recycle", "has_rubbish" if self.has_rubbish else "empty"
         elif self.state == "has_rubbish" and (x, y) == POINTS["enabled"]:
@@ -98,8 +108,24 @@ class UI:
 def rig(monkeypatch):
     clock = Clock()
     ui = UI(clock)
+
+    class ClockScope(OperationScope):
+        def __init__(self, timeout=None, **kwargs):
+            super().__init__(timeout, monotonic=clock.monotonic, **kwargs)
+
+        def sleep(self, seconds):
+            clock.sleep(seconds)
+            self.checkpoint()
+
+    monkeypatch.setattr(flow, "OperationScope", ClockScope)
+    monkeypatch.setattr(navigation, "OperationScope", ClockScope)
+    monkeypatch.setattr(interaction_service, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(flow, "time", SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep))
     monkeypatch.setattr(flow, "observe_recycling_page", ui.observe)
+    monkeypatch.setattr(navigation, "classify_recycling_frame", ui.observe)
+    monkeypatch.setattr(navigation, "probe_city", lambda **_: {
+        "found": True, "confidence": .97, "city_key": CITY["city_key"],
+    })
 
     def check():
         if ui.cancelled:
@@ -135,6 +161,18 @@ def test_already_empty_skips_recycling_and_reward_clicks(rig):
     assert rig.ui.clicks[2][3] - rig.ui.clicks[1][3] >= 4.0 + flow._POST_CLICK_SEC
 
 
+@pytest.mark.parametrize("landing", ["has_rubbish", "empty"])
+def test_direct_landing_uses_the_shared_entry_then_continues_recycling(rig, landing):
+    rig.ui.first_landing = landing
+    result = rig.engine.run()
+
+    assert result["success"] and result["station_entry"]["state"] == landing
+    assert rig.ui.attempts["open_station"] == 1 and not rig.ui.attempts["enter_recycle"]
+    if landing == "empty":
+        assert rig.ui.clicks[1][3] - rig.ui.clicks[0][3] >= 4
+        assert not rig.ui.attempts["recycle_all"]
+
+
 @pytest.mark.parametrize("stage", ["open_station", "recycle_all",
                                     "dismiss_reward", "return_station", "return_city"])
 def test_dropped_first_click_is_retried_only_on_its_source_page(rig, stage):
@@ -159,8 +197,11 @@ def test_persistent_source_respects_click_budget(rig, stage, source, control, po
     rig.ui.state = source
     rig.ui.drops[stage] = 99
     with pytest.raises(flow.RubbishRecyclingError) as error:
-        rig.engine.transition(stage, sources={source}, targets={target}, control=control, point=point,
-                              retry_sec=1. if stage == "dismiss_reward" else 3.)
+        if stage == "open_station":
+            rig.engine._open_station()
+        else:
+            rig.engine.transition(stage, sources={source}, targets={target}, control=control, point=point,
+                                  retry_sec=1. if stage == "dismiss_reward" else 3.)
     assert error.value.code == flow._FAILURE_CODES[stage]
     assert rig.ui.attempts[stage] == max_clicks and rig.clock.now <= 12.
     assert error.value.detail["stage"] == stage
@@ -183,8 +224,7 @@ def test_unknown_during_transition_waits_without_extra_input(rig):
         if rig.ui.clicks and rig.clock.now - rig.ui.clicks[0][3] < 1.5:
             return observation("unknown")
     rig.ui.on_observe = transient
-    result = rig.engine.transition("open_station", sources={"city_panel"}, targets={"station_menu"},
-                                   point=(610, 520))
+    result = rig.engine._open_station()
     assert result["state"] == "station_menu" and len(rig.ui.clicks) == 1
     assert rig.clock.now - rig.ui.clicks[0][3] >= 1.5
 
@@ -193,7 +233,7 @@ def test_unknown_start_never_clicks(rig):
     rig.ui.state = "unknown"
     with pytest.raises(flow.RubbishRecyclingError):
         rig.engine.run()
-    assert not rig.ui.clicks and rig.clock.now == pytest.approx(12.)
+    assert not rig.ui.clicks and rig.clock.now == pytest.approx(8.)
 
 
 def test_moving_city_panel_anchor_is_not_ready_for_fixed_coordinate_click(rig):
@@ -235,12 +275,11 @@ def test_current_button_center_is_used_after_a_dropped_click(rig):
 @pytest.mark.parametrize("state", ["city_panel", "station_menu"])
 def test_late_frame_cannot_authorize_click_or_success(rig, state):
     def slow_observe():
-        rig.clock.now = 12.
+        rig.clock.now = 8.
         return observation(state)
     rig.ui.on_observe = slow_observe
     with pytest.raises(flow.RubbishRecyclingError):
-        rig.engine.transition("open_station", sources={"city_panel"}, targets={"station_menu"},
-                              point=(610, 520))
+        rig.engine._open_station()
     assert not rig.ui.clicks
 
 
@@ -330,8 +369,9 @@ def test_flow_deadline_takes_priority_over_stage_deadline(rig):
 
 @pytest.mark.parametrize("invalid", [(float("nan"), 520), (True, 520), (-1, 520), (1280, 520)])
 def test_invalid_click_points_never_send_input(rig, invalid):
+    rig.engine.station = dict(zip(("x", "y"), invalid))
     with pytest.raises(flow.RubbishRecyclingError) as error:
-        rig.engine.transition("open_station", sources={"city_panel"}, targets={"station_menu"}, point=invalid)
+        rig.engine._open_station()
     assert error.value.code == "rubbish_click_point_invalid" and not rig.ui.clicks
 
 

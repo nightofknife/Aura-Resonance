@@ -22,6 +22,7 @@ _REWARD_THRESHOLD = .85  # Existing two-anchor reward reader's threshold.
 _ENTRY_TEMPLATE = "templates/recycling/controls/entry.png"
 _RECYCLE_ALL_TEMPLATE = "templates/recycling/controls/recycle_all_enabled.png"
 _NO_RUBBISH_TEMPLATE = "templates/recycling/controls/no_rubbish_disabled.png"
+RECYCLING_CENTER_TOLERANCE = 2
 
 
 class RubbishRecyclingVisionError(RuntimeError):
@@ -82,20 +83,13 @@ def observe_recycling_page(
     *, app: Any, vision: Any, city_key: str,
     check_cancelled: Callable[[], None],
 ) -> dict:
-    """Classify one frame using positive evidence, with overlays taking priority.
-
-    A partial reward, conflicting same-page controls, or absent controls yields
-    ``unknown``. Callers may wait but must not click through an unknown page.
-    All centers use global native 1280x720 coordinates.
-    """
+    """Capture and classify the recycling flow's current page."""
     check_cancelled()
     try:
         capture = app.capture(rect=_FRAME_REGION)
         check_cancelled()
         image = getattr(capture, "image", None)
-        if (not bool(getattr(capture, "success", False))
-                or not isinstance(image, np.ndarray) or image.dtype != np.uint8
-                or image.shape != (720, 1280, 3)):
+        if not bool(getattr(capture, "success", False)):
             raise ValueError("Unusable native 1280x720 RGB capture")
     except Exception as exc:
         check_cancelled()
@@ -103,6 +97,23 @@ def observe_recycling_page(
             "rubbish_capture_failed", "Unable to capture rubbish page",
             {"region": list(_FRAME_REGION), "cause": str(exc)},
         ) from exc
+
+    return {**classify_recycling_frame(image=image, vision=vision, check_cancelled=check_cancelled),
+            "city_key": city_key}
+
+
+def classify_recycling_frame(*, image: np.ndarray, vision: Any, check_cancelled: Callable[[], None]) -> dict:
+    """Classify a native RGB frame using positive evidence and overlay precedence.
+
+    Partial rewards, conflicting controls and missing evidence are unknown.
+    Report control centers in native client coordinates.
+    """
+    check_cancelled()
+    if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.shape != (720, 1280, 3):
+        raise RubbishRecyclingVisionError(
+            "rubbish_capture_failed", "Unable to capture rubbish page",
+            {"region": list(_FRAME_REGION), "cause": "Unusable native 1280x720 RGB capture"},
+        )
 
     def match(template, region, **options):
         return _match(image=image, vision=vision, template=template, region=region,
@@ -117,7 +128,7 @@ def observe_recycling_page(
     def result(state="unknown", reason="no_positive_page_evidence", selected=None):
         check_cancelled()
         return {"state": state, "reason": reason, "match": selected,
-                "evidence": evidence, "city_key": city_key,
+                "evidence": evidence,
                 "region": list(_FRAME_REGION)}
 
     # Back is input-location evidence only. It cannot classify any page itself.

@@ -21,6 +21,7 @@ from ._bounded_observation import ObservationBudget, wait_for_observation
 from ._recognition_failure import with_template_failure
 from ._template_observation import observe_template
 from ._navigation_templates import GLOBAL_BACK
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 from . import _passenger_destination_vision as destination_vision
 
 class PassengerPcError(RuntimeError):
@@ -42,7 +43,6 @@ class PassengerPcError(RuntimeError):
 _PLAN_ROOT = Path(__file__).resolve().parents[2]
 _FULL_SCREEN = [0, 0, 1280, 720]
 
-_MAIN_BUTTON_TEMPLATE = "templates/passenger/management/entry.png"
 _MAIN_SCREEN_TEMPLATE = "templates/navigation/global/train_maintenance.png"
 _MAIN_SCREEN_REGION = [920, 640, 80, 65]
 _SCORE_MARKER_TEMPLATE = "templates/passenger/management/score_marker.png"
@@ -59,7 +59,6 @@ _AMOUNT_CONFIRM_TEMPLATE = "templates/passenger/amount/confirm.png"
 _RECRUIT_SUCCESS_TEMPLATE = "templates/passenger/recruitment/success.png"
 _SETTLEMENT_TEMPLATE = "templates/passenger/settlement/revenue.png"
 
-_MAIN_BUTTON_REGION = [950, 600, 220, 120]
 _SCORE_MARKER_REGION = [120, 70, 330, 130]
 _RECRUIT_BUTTON_REGION = [1040, 350, 220, 280]
 _FLYER_MODE_REGION = [0, 500, 470, 150]
@@ -87,9 +86,6 @@ _DISPATCH_CLUSTER_DISTANCE = 40
 _DISPATCH_LOCK_MAX_DX = 120
 _PAGE_TIMEOUT = 12.0
 _POLL_INTERVAL = 0.35
-_OPEN_MANAGEMENT_MAX_ATTEMPTS = 3
-_OPEN_MANAGEMENT_SCORE_TIMEOUT = 4.0
-_OPEN_MANAGEMENT_RETRY_DELAY = 1.0
 _LOCAL_CANCEL_CHECK: ContextVar[Optional[Callable[[], bool]]] = ContextVar(
     "passenger_local_cancel_check", default=None,
 )
@@ -97,7 +93,7 @@ _LOCAL_CANCEL_CHECK: ContextVar[Optional[Callable[[], bool]]] = ContextVar(
 def _apply_location_config() -> None:
     """Load passenger UI regions while retaining safe built-in defaults."""
 
-    global _MAIN_BUTTON_REGION, _SCORE_MARKER_REGION, _RECRUIT_BUTTON_REGION
+    global _SCORE_MARKER_REGION, _RECRUIT_BUTTON_REGION
     global _FLYER_MODE_REGION, _DESTINATION_MARKER_REGION, _DESTINATION_NEXT_REGION
     global _DESTINATION_CITY_REGION, _DISPATCH_MARKER_REGION, _DISPATCH_CARD_REGION
     global _DISPATCH_CONFIRM_REGION, _AMOUNT_MAX_REGION, _AMOUNT_CONFIRM_REGION
@@ -114,7 +110,6 @@ def _apply_location_config() -> None:
         return
 
     region_targets = {
-        "main_button_region": "_MAIN_BUTTON_REGION",
         "score_marker_region": "_SCORE_MARKER_REGION",
         "recruit_button_region": "_RECRUIT_BUTTON_REGION",
         "flyer_mode_region": "_FLYER_MODE_REGION",
@@ -814,121 +809,36 @@ def _open_recruitment_hub_from_score(app: Any, ocr: Any, vision: Any, *,
     read_only=False,
     description="Open passenger management from the stable Resonance PC city-main screen.",
 )
-@requires_services(app="plans/aura_base/app", vision="plans/aura_base/vision")
-def resonance_pc_open_passenger_management(app: Any = None, vision: Any = None) -> Dict[str, Any]:
-    if app is None or vision is None:
+@requires_services(app="plans/aura_base/app", vision="plans/aura_base/vision",
+                   interaction="plans/aura_base/interaction")
+def resonance_pc_open_passenger_management(app: Any = None, vision: Any = None,
+                                           interaction: Any = None) -> Dict[str, Any]:
+    if app is None or (vision is None and interaction is None):
         raise RuntimeError("app/vision services are required")
-    attempts: List[Dict[str, Any]] = []
-    last_main: Dict[str, Any] = {}
-    last_score: Dict[str, Any] = {}
+    try:
+        opened = open_station_page("客运管理", app=app, vision=vision, interaction=interaction,
+                                   check_start=True, cancel_check=_check_cancelled, entry_timeout=12.)
+    except StationMainNavigationError as exc:
+        code = "passenger_management_not_found"
+        matches = (exc.detail.get("last_observation") or {}).get("matches", {})
+        if exc.code == "station_main_entry_not_found" and matches.get(_MAIN_SCREEN_TEMPLATE) != "present":
+            code = "not_on_city_main"
+        _raise(code, "Passenger management page was not confirmed", exc.detail)
 
-    for attempt in range(1, _OPEN_MANAGEMENT_MAX_ATTEMPTS + 1):
-        stable = _wait_main_stable(
-            app,
-            vision,
-            timeout_sec=12.0 if attempt == 1 else 4.0,
-        )
-        last_main = dict(stable.get("match") or {})
-        # Main-screen identity is not the passenger entry's click target.
-        center = None
-        record: Dict[str, Any] = {
-            "attempt": attempt,
-            "main_stable": stable,
-            "clicked": False,
-        }
-        logger.info(
-            "[PassengerManagement] phase=main_stable attempt=%s/%s confirmed=%s "
-            "confidence=%.4f center=%s",
-            attempt,
-            _OPEN_MANAGEMENT_MAX_ATTEMPTS,
-            bool(stable.get("confirmed")),
-            float(last_main.get("confidence") or 0.0),
-            last_main.get("center"),
-        )
-
-        if stable.get("confirmed"):
-            management_budget = ObservationBudget(3.0, monotonic=time.monotonic, check_cancelled=_check_cancelled)
-            management_button = _wait_template(
-                app, vision, _MAIN_BUTTON_TEMPLATE, _MAIN_BUTTON_REGION,
-                timeout_sec=3.0, _budget=management_budget,
-            )
-            record["management_button"] = management_button
-            if management_button.get("found"):
-                center = management_button.get("center")
-            logger.info(
-                "[PassengerManagement] phase=entry_match attempt=%s found=%s confidence=%.4f center=%s",
-                attempt, bool(management_button.get("found")),
-                float(management_button.get("confidence") or 0.0), center,
-            )
-
-        if not stable.get("confirmed") or not isinstance(center, list) or len(center) != 2:
-            last_score = _wait_template(
-                app,
-                vision,
-                _SCORE_MARKER_TEMPLATE,
-                _SCORE_MARKER_REGION,
-                timeout_sec=_OPEN_MANAGEMENT_SCORE_TIMEOUT,
-            )
-            record["score_marker"] = last_score
-            attempts.append(record)
-            if last_score.get("found"):
-                return {
-                    "success": True,
-                    "page_state": "passenger_score",
-                    "main_button": last_main,
-                    "score_marker": last_score,
-                    "attempts": attempts,
-                }
-            continue
-
-        if not management_budget.active():
-            _raise("passenger_management_not_found", "management entry observation expired before input",
-                   {"attempts": attempts, "management_button": management_button})
-        app.click(x=int(center[0]), y=int(center[1]))
-        record["clicked"] = True
-        record["click_point"] = [int(center[0]), int(center[1])]
-        last_score = _wait_template(
-            app,
-            vision,
-            _SCORE_MARKER_TEMPLATE,
-            _SCORE_MARKER_REGION,
-            timeout_sec=_OPEN_MANAGEMENT_SCORE_TIMEOUT,
-        )
-        record["score_marker"] = last_score
-        attempts.append(record)
-        logger.info(
-            "[PassengerManagement] phase=score attempt=%s/%s found=%s confidence=%.4f",
-            attempt,
-            _OPEN_MANAGEMENT_MAX_ATTEMPTS,
-            bool(last_score.get("found")),
-            float(last_score.get("confidence") or 0.0),
-        )
-        if last_score.get("found"):
-            return {
-                "success": True,
-                "page_state": "passenger_score",
-                "main_button": last_main,
-                "score_marker": last_score,
-                "attempts": attempts,
-            }
-        if attempt < _OPEN_MANAGEMENT_MAX_ATTEMPTS:
-            time.sleep(_OPEN_MANAGEMENT_RETRY_DELAY)
-
-    first_main_confirmed = bool(
-        attempts and (attempts[0].get("main_stable") or {}).get("confirmed")
-    )
-    if not first_main_confirmed:
-        _raise(
-            "not_on_city_main",
-            "train maintenance icon was not stable on city main",
-            {"attempts": attempts, "last_main": last_main, "last_score": last_score},
-        )
-    _raise(
-        "passenger_management_not_found",
-        "passenger score page did not appear after retrying the management button",
-        {"attempts": attempts, "last_main": last_main, "last_score": last_score},
-    )
-    return {}
+    score = {**opened["last_observation"]["match_details"][_SCORE_MARKER_TEMPLATE],
+             "template": _SCORE_MARKER_TEMPLATE, "region": _SCORE_MARKER_REGION}
+    attempts = []
+    main = {}
+    for index, (center, evidence) in enumerate(zip(opened["clicks"], opened["entry_observations"]), 1):
+        main = evidence.get(_MAIN_SCREEN_TEMPLATE, {})
+        attempts.append({"attempt": index, "clicked": True, "click_point": center,
+                         "main_stable": {"confirmed": bool(main.get("found")), "match": main},
+                         "management_button": evidence.get("templates/navigation/station_main/passenger_entry.png", {})})
+    if not attempts:
+        attempts.append({"attempt": 1, "clicked": False, "main_stable": {"confirmed": False, "match": {}}})
+    attempts[-1]["score_marker"] = score
+    return {"success": True, "page_state": "passenger_score", "main_button": main,
+            "score_marker": score, "attempts": attempts}
 
 
 @action_info(

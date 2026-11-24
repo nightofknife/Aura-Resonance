@@ -14,6 +14,7 @@ class NavigationTemplateProfile:
     use_grayscale: bool = True
     match_method: int = cv2.TM_CCOEFF_NORMED
     preprocess: str = "none"
+    mask: str | None = None
 
     def match_kwargs(self) -> dict:
         return {"threshold": self.threshold, "use_grayscale": self.use_grayscale,
@@ -35,6 +36,28 @@ GLOBAL_CITY_MAIN = NavigationTemplateProfile(
 )
 CITY_PANEL_REPUTATION = NavigationTemplateProfile(
     "templates/navigation/city/panel_reputation.png", (21, 633, 85, 75), .86,
+)
+EXCHANGE_MENU = NavigationTemplateProfile(
+    "templates/commerce/trade/shop/menu_ready.png", (720, 350, 220, 120), .86,
+)
+PRISON_DAILY_REPORT_HEADER = NavigationTemplateProfile(
+    "templates/workshop/warehouse/controls/prison_daily_report_header.png", (248, 0, 325, 63), .92,
+)
+MIRAGE_ISLAND_HOME = NavigationTemplateProfile(
+    "templates/commerce/investment/cape_island/controls/home_anchor.png", (0, 60, 1280, 660), .86,
+)
+MIRAGE_ISLAND_ADVOCACY = NavigationTemplateProfile(
+    "templates/commerce/investment/cape_island/controls/advocacy_button.png", (1070, 570, 200, 135), .96,
+    use_grayscale=False, match_method=cv2.TM_SQDIFF_NORMED,
+)
+MIRAGE_ISLAND_REVENUE = NavigationTemplateProfile(
+    "templates/commerce/investment/cape_island/controls/revenue_overview_anchor.png", (610, 135, 300, 90), .86,
+)
+MIRAGE_ISLAND_INVESTMENT = NavigationTemplateProfile(
+    "templates/commerce/investment/cape_island/controls/investment_page_anchor.png", (590, 130, 690, 570), .86,
+)
+MIRAGE_ISLAND_INVESTMENT_SUCCESS = NavigationTemplateProfile(
+    "templates/commerce/investment/cape_island/controls/investment_success.png", (500, 180, 300, 350), .86,
 )
 
 

@@ -20,10 +20,12 @@ from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.scheduler.operation_scope import OperationScope, current_operation_scope
 from packages.aura_core.utils.exceptions import StopTaskException
-from ....aura_base.src.services.interaction_service import InputSession, TransitionPolicy, TransitionProbe, TransitionState
+from ....aura_base.src.services.interaction_service import TransitionPolicy, TransitionProbe, TransitionState
 from ._city_panel_vision import CITY_REGION, probe_city, wait_city
+from ._city_shop_entry import CityShopEntryError
 from ._prison_warehouse_ledger import normalize_request
 from ._prison_warehouse_ui import PrisonWarehouseUi
+from .city_shop_navigation_pc_actions import enter_resolved_city_shop
 from .runtime_preflight_pc_actions import resonance_pc_require_client_resolution
 
 PLAN = Path(__file__).resolve().parents[2]
@@ -96,7 +98,6 @@ def resonance_pc_product_workflow_enter_from_city(city_key: Any = None, app: Any
     _check_cancelled()
     scope = OperationScope(parent=current_operation_scope(), target=getattr(app, "target_runtime", None),
                            timeout=30, cancel_check=_check_cancelled)
-    attempted = False
     city = None
     try:
         with scope.activate():
@@ -110,29 +111,20 @@ def resonance_pc_product_workflow_enter_from_city(city_key: Any = None, app: Any
             fresh = _city_from_frame(frame, app, vision)
             if fresh.get("found") is not True or fresh.get("city_key") != city["city_key"]:
                 raise ValueError("City identity changed before the Reforming Center input")
-            ui = PrisonWarehouseUi()
-            scope.checkpoint()
-            attempted = True
-            receipt = interaction.send_input(lambda: app.click(x=point["x"], y=point["y"]), scope=scope,
-                                             point=(point["x"], point["y"]), frame=frame,
-                                             session=InputSession(),
-                                             bounds=(0, 0, 1280, 720), check_cancelled=_check_cancelled)
-
-            def overview():
-                current = interaction.observation.capture(scope=scope, roi=(0, 0, 1280, 720))
-                return ui.probe(cv2.cvtColor(current.image, cv2.COLOR_RGB2BGR), read_list=False)
-
-            ready = interaction.confirm(overview, scope=scope.child(20), stable_scans=2, poll_seconds=.3,
-                                        accept=lambda value: value.get("page") == "overview",
-                                        equivalent=lambda a, b: a.get("page") == b.get("page"),
-                                        sleep=scope.sleep, check_cancelled=_check_cancelled)
-            if ready is None:
-                return {"success": False, "page_state": "unknown", "reason": "product_workflow_entry_unconfirmed",
-                        "entry_attempted": True, "city_key": city["city_key"], "input_sent": receipt.sent}
+            entered = enter_resolved_city_shop(
+                point, app=app, vision=vision, interaction=interaction, source_frame=frame,
+                check_cancelled=_check_cancelled,
+            )
             return {"success": True, "status": "entered", "page_state": OVERVIEW,
-                    "city_key": city["city_key"], "entry_attempted": True, "click": point}
+                    "city_key": city["city_key"], "entry_attempted": bool(entered["click_attempts"]), "click": point}
     except Exception as exc:
         _check_cancelled()
+        detail = getattr(exc, "detail", {})
+        clicks = detail.get("clicks", ())
+        attempted = bool(clicks or getattr(exc, "receipts", ()))
+        if isinstance(exc, CityShopEntryError) and exc.code == "city_shop_entry_timeout" and attempted:
+            return {"success": False, "page_state": "unknown", "reason": "product_workflow_entry_unconfirmed",
+                    "entry_attempted": True, "city_key": city["city_key"], "input_sent": any(row["sent"] for row in clicks)}
         return {"success": False, "page_state": "unknown", "reason": "product_workflow_city_entry_failed",
                 "entry_attempted": attempted, "city_key": city.get("city_key") if isinstance(city, dict) else None,
                 "error": {"type": type(exc).__name__, "message": str(exc)}}

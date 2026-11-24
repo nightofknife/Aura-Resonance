@@ -17,7 +17,6 @@ from packages.aura_core.scheduler.cancellation import (
     clear_task_cancel, has_pending_sync_actions,
 )
 from plans.resonance_pc.src.actions import city_trade_flow_pc_actions as trade
-from plans.resonance_pc.src.actions import _city_panel_vision as city_vision
 from packages.resonance_gui.logic import TradeProgressState, reduce_trade_progress
 from tests.unit.test_resonance_pc_sparkling_water_trade import (
     harness as trade_harness, routes, run_full, snapshot,
@@ -702,31 +701,33 @@ def test_registered_recovery_adapter_tracks_cancelled_sync_worker(
 @pytest.mark.parametrize("already_cancelled", [False, True],
                          ids=["cancelled-during-template-match", "cancelled-before-template-match"])
 def test_real_city_panel_opener_never_clicks_after_cancellation(monkeypatch, already_cancelled):
+    from plans.aura_base.src.services.vision_service import VisionService
+
     cancelled = {"value": already_cancelled}
     operations = []
-    frame = np.zeros((170, 175, 3), np.uint8)
+    frame = np.zeros((720, 1280, 3), np.uint8)
     monkeypatch.setattr(trade, "is_current_task_cancel_requested", lambda: cancelled["value"])
 
     def capture(*, rect):
         operations.append("capture")
-        assert rect == city_vision.CITY_REGION
+        assert rect == (0, 0, 1280, 720)
         return SimpleNamespace(success=True, image=frame)
 
-    def find_templates_batch(**options):
+    def find_template(**options):
         operations.append("match")
-        assert options["source_image"] is frame
         # Cancellation while vision was busy must prevent accepting its result or clicking.
         cancelled["value"] = True
-        return [SimpleNamespace(found=True, confidence=.99, debug_info={}) for _ in range(21)]
+        return SimpleNamespace(found=True, confidence=.99, center_point=(10, 10), debug_info={})
 
     def click(**kwargs):
         pytest.fail("A completed template result must not permit a click after cancellation")
 
-    app = SimpleNamespace(capture=capture, click=click)
-    vision = SimpleNamespace(find_templates_batch=find_templates_batch)
+    app = SimpleNamespace(capture=capture, click=click, get_window_size=lambda: (1280, 720))
+    vision = VisionService()
+    monkeypatch.setattr(vision, "find_template", find_template)
     with pytest.raises(trade.CityTradeFlowError) as error:
         trade.resonance_pc_open_city_panel_from_main(
-            app=app, vision=vision, timeout_sec=0,
+            app=app, vision=vision,
         )
     assert error.value.code == "trade_cancelled"
     assert operations == ([] if already_cancelled else ["capture", "match"])

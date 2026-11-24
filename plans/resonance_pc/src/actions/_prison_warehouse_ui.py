@@ -411,6 +411,19 @@ class PrisonWarehouseUi:
                     "scan_viewport": list(self.scan_viewport), "global_coverage_complete": False}
         return slots, unresolved, geometry
 
+    def probe_city_entry(self, image_bgr):
+        """Recognize the overview after entering from the city panel."""
+        event_list = self._control(image_bgr, "overview_event_list")
+        warehouse = all(self._control(image_bgr, name)["found"] is True for name in (
+            "train_title_identity", "material_title_identity", "product_title_identity",
+        ))
+        page = "overview" if event_list["found"] else "unknown"
+        return {
+            "valid": event_list["valid"],
+            "page": "warehouse" if warehouse else page,
+            "controls": {"overview_event_list": event_list},
+        }
+
     def probe(self, image_bgr, read_quantities=False, goods_filter=None, read_list=True):
         result = {"valid": False, "page": "unknown", "connection": "unknown", "tp_connection": "unknown", "controls": {},
                   "capacity": {"status": "not_requested", "current": None, "limit": None, "remaining": None, "full": None},

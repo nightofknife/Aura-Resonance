@@ -1,0 +1,35 @@
+enter_city_shop_pc:
+  meta:
+    role: user_task
+    domain: 商贸运输
+    title: 进入城市商店
+    description: 请先打开当前城市的建筑面板。选择目标店铺，任务确认目标页面就绪后结束。
+    entry_point: true
+    concurrency: exclusive
+    inputs:
+      - name: shop_name
+        type: enum
+        enum: [交易所, 休息区, 整顿中心, 蜃息岛, 垃圾处理中心]
+        required: true
+      - name: city_name
+        type: string
+        description: 可留空自动识别。填写时按此城市的入口坐标直接点击。
+        required: false
+        nullable: true
+        default: null
+  steps:
+    enter:
+      action: resonance_pc.enter_city_shop
+      params:
+        shop_name: "{{ inputs.shop_name }}"
+        city_name: "{{ inputs.city_name }}"
+  returns:
+    success: "{{ nodes.enter.output.success }}"
+    city_key: "{{ nodes.enter.output.city_key }}"
+    city_name: "{{ nodes.enter.output.city_name }}"
+    shop_key: "{{ nodes.enter.output.shop_key }}"
+    shop_name: "{{ nodes.enter.output.shop_name }}"
+    page_state: "{{ nodes.enter.output.page_state }}"
+    click_attempts: "{{ nodes.enter.output.click_attempts }}"
+    clicks: "{{ nodes.enter.output.clicks }}"
+    last_observation: "{{ nodes.enter.output.last_observation }}"

@@ -13,6 +13,7 @@ import pytest
 from plans.resonance_pc.src.actions import _trade_buy_selection as selection
 from plans.resonance_pc.src.actions import _trade_goods_investment_vision as investment
 from plans.resonance_pc.src.actions import cape_island_investment_pc_actions as cape
+from plans.resonance_pc.src.actions._navigation_templates import MIRAGE_ISLAND_ADVOCACY
 from plans.resonance_pc.src.actions import _trade_sell_state as sell
 from tools import build_trade_product_templates as products
 
@@ -54,12 +55,14 @@ def test_investment_resources_remain_contained_immutable_and_cover_runtime_asset
     # Native full-card variants belong to the review catalog, not the runtime cache.
     reviewed = set(manifest["cards"]["variants"]) | {manifest["cards"]["frame_mask"]}
     # Cape Island is a separate bank under the shared investment category.
-    # Its runtime declarations own that bank; unknown PNGs still fail exact coverage.
+    # Investment and city-shop navigation share this bank; unknown PNGs still fail exact coverage.
+    advocacy = Path(MIRAGE_ISLAND_ADVOCACY.path)
     cape_references = {
         cape._ISLAND_HOME_TEMPLATE, cape._REVENUE_OVERVIEW_TEMPLATE,
         cape._INVESTMENT_TAB_TEMPLATE, cape._INVESTMENT_PAGE_TEMPLATE,
         cape._INVEST_BUTTON_TEMPLATE, cape._INVESTMENT_SUCCESS_TEMPLATE,
         cape._INCOME_ENTRY_TEMPLATE, cape._INCOME_ENTRY_MASK, cape._CARD_TEMPLATE_MASK,
+        advocacy.as_posix(), advocacy.with_suffix(".mask.png").as_posix(),
     } | {template for grades in cape.CARD_OPTION_TEMPLATES.values()
          for templates in grades.values() for template in templates}
     cape_root = root / "cape_island"

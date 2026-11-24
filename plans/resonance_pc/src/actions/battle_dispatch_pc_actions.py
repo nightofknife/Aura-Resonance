@@ -12,9 +12,8 @@ import cv2
 
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
-from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
-from ....aura_base.src.services.interaction_service import TransitionPolicy, TransitionProbe, TransitionState
-from ....aura_base.src.services.observation_service import CaptureError
+from ._navigation_templates import NavigationTemplateProfile
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 
 _PLAN_ROOT = Path(__file__).resolve().parents[2]
 _BATTLE_CATALOG_FILE = _PLAN_ROOT / "data" / "meta" / "battle_catalog.json"
@@ -1841,56 +1840,18 @@ def resonance_pc_try_select_action_summary_stage(
 )
 @requires_services(app="plans/aura_base/app", interaction="plans/aura_base/interaction")
 def resonance_pc_open_battle_terminal(app: Any = None, interaction: Any = None) -> Dict[str, Any]:
-    scope = OperationScope(12.0, parent=current_operation_scope(), target=getattr(app, "target_runtime", None))
-    policy = TransitionPolicy(max_clicks=2, allow_retry=True, settle_seconds=0.3, latch_source_loss=True)
-    state = TransitionState(policy)
-    observation = interaction.observation
-    main_template = _PLAN_ROOT / "templates/battle/navigation/main_terminal_marker.png"
-    category_templates = tuple(_PLAN_ROOT / f"templates/battle/dispatch/category_{key}.png"
-                               for key in ("ct", "gp"))
-
-    def observe(allow_source, budget):
-        try:
-            frame = observation.capture(scope=budget)
-        except CaptureError:
-            return TransitionProbe()
-        categories = observation.match_templates(frame, category_templates, scope=budget,
-                                                 roi=(20, 180, 200, 160), threshold=0.95)
-        if any(match.state == "present" for match in categories):
-            return TransitionProbe("target", key="battle_terminal", frame=frame)
-        if allow_source and all(match.state == "absent" for match in categories):
-            entrance = observation.match_template(frame, main_template, scope=budget,
-                                                  roi=(1080, 375, 190, 80), threshold=0.95)
-            if entrance.state == "present" and entrance.client_center is not None:
-                return TransitionProbe("source", key="main_terminal_marker", hit=entrance, frame=frame)
-        return TransitionProbe(frame=frame)
-
-    def probe(allow_source):
-        budget = scope.child(3.0 if allow_source else 2.0)
-        return interaction.probe_transition(
-            lambda read_source: observe(read_source, budget), allow_source=allow_source, scope=budget,
-            stable_scans=2, poll_seconds=0.2, state=state,
-        )
-
-    def click(confirmed, attempt):
-        x, y = confirmed.hit.client_center
-        logger.info("[BattleTerminal] click attempt=%s point=(%s,%s)", attempt, x, y)
-        return app.click(x=x, y=y)
-
-    def failed():
-        return ResonancePcBattleDispatchError(
-            "battle_terminal_entry_unconfirmed", "未能确认作战终端已打开。",
-            {"attempts": len(state.receipts), "last_page": state.last.key if state.last else None},
-        )
-
+    # Existing callers may already be in either terminal category.
+    categories = tuple((NavigationTemplateProfile(
+        f"templates/battle/dispatch/category_{key}.png", (20, 180, 200, 160), .95,
+    ),) for key in ("ct", "gp"))
     try:
-        result = interaction.run_transition(probe, click, scope=scope, policy=policy, state=state,
-                                            source_unconfirmed=failed, exhausted=failed)
-    except OperationTimeout as exc:
-        scope.check_cancelled()
-        raise failed() from exc
-    logger.info("[BattleTerminal] opened with %s entrance click(s)", len(result.receipts))
-    return {"opened": True, "click_count": len(result.receipts)}
+        opened = open_station_page("作战终端", app=app, interaction=interaction,
+                                   check_start=True, already_ready=categories)
+    except StationMainNavigationError as exc:
+        raise ResonancePcBattleDispatchError(
+            "battle_terminal_entry_unconfirmed", "未能确认作战终端已打开。", exc.detail,
+        ) from exc
+    return {"opened": True, "click_count": opened["click_attempts"]}
 
 
 @action_info(

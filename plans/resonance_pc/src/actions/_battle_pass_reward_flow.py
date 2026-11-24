@@ -110,13 +110,7 @@ class BattlePassRewardFlow(DailyRewardFlow):
     def run(self):
         try:
             with self.scope.activate():
-                page = self.confirmed_page({"main"})
-                if page.absent("main_entry_with_red"):
-                    logger.info("[BattlePassRewards] skipped: confirmed main screen without star reminder")
-                    return self.result("skipped_no_reminder", "no_battle_pass_reminder")
-                self.transition("enter_passes", lambda p: p.page_state == "main" and p.present("main_entry_with_red"),
-                                lambda p: p.page_state in PASS_PAGES and (p.selected_row is not None or bool(p.reminders)),
-                                "main_entry_with_red")
+                self.open_reward_page("通行证", "enter_passes")
                 while True:
                     page = self.confirmed_page(PASS_PAGES, timeout=8.)
                     if not page.reminders:

@@ -11,8 +11,11 @@ import pytest
 from PIL import Image
 
 from packages.aura_core.context.persistence.persistent_data_service import PersistentDataService
+from packages.aura_core.scheduler.operation_scope import OperationScope
 from plans.aura_base.src.services.vision_service import VisionService
 from plans.resonance_pc.src.actions import sparkling_water_pc_actions as water
+from plans.resonance_pc.src.actions import city_shop_navigation_pc_actions as navigation
+from plans.resonance_pc.src.actions._navigation_templates import CITY_PANEL_REPUTATION, GLOBAL_BACK
 from packages.aura_core.observability import failure_evidence
 from plans.resonance_pc.src.actions import city_trade_flow_pc_actions as trade
 from plans.resonance_pc.src.services.city_shop_data_pc_service import ResonancePcCityShopDataService
@@ -40,6 +43,10 @@ def frames():
     city[520:570, 170:570] = np.random.default_rng(9).integers(0, 256, (50, 400, 3), dtype=np.uint8)
     city[500:633, 35:168] = np.array(Image.open(
         water.PLAN_ROOT / "templates/navigation/city/identity/lanxin_city.png").convert("RGB"))
+    for profile in (CITY_PANEL_REPUTATION, GLOBAL_BACK):
+        icon = np.array(Image.open(water.PLAN_ROOT / profile.path).convert("RGB"))
+        x, y = profile.roi[:2]
+        city[y:y + icon.shape[0], x:x + icon.shape[1]] = icon
     result["city_panel"] = city
     return result
 
@@ -60,7 +67,8 @@ class ReplayApp:
     def capture(self, rect):
         x, y, w, h = rect
         self.captures.append((self.page, rect))
-        return SimpleNamespace(success=not self.failed_capture, image=self.frames[self.page][y:y+h, x:x+w].copy())
+        return SimpleNamespace(success=not self.failed_capture, image=self.frames[self.page][y:y+h, x:x+w].copy(),
+                               captured_at_monotonic=water.time.monotonic() + .001)
 
     def click(self, x, y, *args, **kwargs):
         old = self.page
@@ -99,9 +107,18 @@ def fast_time(monkeypatch):
         now[0] += delay
         await real_sleep(0)
 
+    class ClockScope(OperationScope):
+        def __init__(self, timeout=None, **kwargs):
+            super().__init__(timeout, monotonic=lambda: now[0], **kwargs)
+
+        def sleep(self, seconds):
+            now[0] += seconds
+            self.checkpoint()
+
     monkeypatch.setattr(water.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(water.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
     monkeypatch.setattr(water.asyncio, "sleep", sleep)
+    monkeypatch.setattr(navigation, "OperationScope", ClockScope)
     return now
 
 
