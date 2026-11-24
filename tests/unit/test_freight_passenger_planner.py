@@ -102,6 +102,20 @@ def test_short_route_reports_remaining_target_without_adding_travel(simple_model
     assert source == original
 
 
+def test_recruitment_cities_filter_only_origins_and_respect_native_availability(simple_model):
+    source = route("A", "B", "C", "D")
+    options = {"seat_capacity": 16, "flyer_target": 10}
+    default = planner.build_passenger_plan(source, options)
+    assert default["trips"][0]["from_city_id"] == "A"
+
+    restricted = planner.build_passenger_plan(source, {**options, "recruitment_city_ids": ["B"]})
+    assert [(trip["from_city_id"], trip["to_city_id"]) for trip in restricted["trips"]] == [("B", "D")]
+    assert planner.build_passenger_plan(source, {**options, "recruitment_city_ids": []})["trips"] == []
+
+    simple_model["cities"]["B"]["leaflet_enabled"] = False
+    assert planner.build_passenger_plan(source, {**options, "recruitment_city_ids": ["B"]})["trips"] == []
+
+
 def test_repeated_destination_only_has_its_first_future_arrival(simple_model):
     source = route("A", "B", "C", "B", "D")
     opts = normalize_passenger_options({"seat_capacity": 16})

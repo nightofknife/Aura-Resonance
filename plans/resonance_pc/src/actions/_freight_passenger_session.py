@@ -8,7 +8,7 @@ from typing import Any
 
 from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from packages.resonance_shared.passenger_parameters import normalize_passenger_options, resolve_flyer_target
-from ._freight_passenger_planner import build_passenger_plan
+from ._freight_passenger_planner import build_passenger_plan, can_recruit_from
 from .passenger_pc_actions import (
     PassengerPcError, _LOCAL_CANCEL_CHECK, _check_cancelled,
     _return_recruitment_pages_to_main, _read_flyer_inventory, _recruit_passengers_by_flyer,
@@ -98,15 +98,18 @@ class FreightPassengerSession:
                                    {"page_state": state})
         return state
 
-    async def initialize(self, *, page_state, app, ocr, vision, ensure_main):
+    async def initialize(self, *, page_state, app, ocr, vision, ensure_main, index=0):
         if self.initialized:
             return {"page_state": page_state, "initialized": True}
-        if self.target <= 0 or not self.route or not self._plan(0, structural=True).get("trips"):
+        if self.target <= 0 or not self.route or not self._plan(index, structural=True).get("trips"):
             self.initialized = True
             self.stop_reason = ("target_met" if self.target <= 0 else "flyers_exhausted"
                                 if self.inventory is not None and self.inventory < 10 else "route_exhausted")
             return {"page_state": page_state, "initialized": True}
         if self.inventory is None:
+            city_id = str(self.route[index]["from_city_id"])
+            if not can_recruit_from(city_id, self.options, self.city_prestige):
+                return {"page_state": page_state, "initialized": False}
             page_state = await self._ensure_main(page_state, app, vision, ensure_main)
             try:
                 observed = await self._worker(_read_flyer_inventory, app, ocr, vision)
@@ -124,8 +127,8 @@ class FreightPassengerSession:
             self.inventory = self.initial_inventory = inventory
             page_state = "city_main"
         self.initialized = True
-        plan = self._plan(0)
-        await self._emit("passenger_planning", "completed", 0, plan=deepcopy(plan))
+        plan = self._plan(index)
+        await self._emit("passenger_planning", "completed", index, plan=deepcopy(plan))
         if self.inventory < 10:
             self.stop_reason = "flyers_exhausted"
         return {"page_state": page_state, "initialized": True, "inventory": self.inventory}
@@ -137,8 +140,10 @@ class FreightPassengerSession:
             return await self._skip("passenger_recruit", index, page_state, "batch_onboard")
         if not self.initialized:
             initialized = await self.initialize(page_state=page_state, app=app, ocr=ocr,
-                                                vision=vision, ensure_main=ensure_main)
+                                                vision=vision, ensure_main=ensure_main, index=index)
             page_state = initialized["page_state"]
+            if not initialized["initialized"]:
+                return await self._skip("passenger_recruit", index, page_state, "not_selected")
         if self.flyers_used >= self.target:
             self.stop_reason = "target_met"
             return await self._skip("passenger_recruit", index, page_state, self.stop_reason)

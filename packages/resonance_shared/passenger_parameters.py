@@ -15,6 +15,7 @@ SCORE_NAMES = (
 DEFAULT_PASSENGER_OPTIONS: dict[str, Any] = {
     "seat_capacity": None,
     "flyer_target": 0,
+    "recruitment_city_ids": None,
     "transport_level": 100,
     "seat_level": 5,
     "scores": {name: 42000 if name == "comfort" else 7000 for name in SCORE_NAMES},
@@ -49,6 +50,13 @@ def normalize_passenger_options(options: Any, *, enabled: bool = True) -> dict[s
     else:
         _integer(capacity, "seat_capacity", 1)
     _integer(result["flyer_target"], "flyer_target", 0)
+    cities = result["recruitment_city_ids"]
+    if cities is not None:
+        if not isinstance(cities, list) or any(
+            not isinstance(city, str) or not city.strip() for city in cities
+        ):
+            raise ValueError("passenger recruitment_city_ids must be a list of nonempty city IDs")
+        result["recruitment_city_ids"] = list(dict.fromkeys(city.strip() for city in cities))
     _integer(result["transport_level"], "transport_level", 1, 100)
     _integer(result["seat_level"], "seat_level", 1, 5)
     _integer(result["furniture_bonus_bps"], "furniture_bonus_bps", 0)

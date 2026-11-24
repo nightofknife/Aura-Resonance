@@ -5,11 +5,15 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QFormLayout, QLabel, QSpinBox, QDoubleSpinBox, QComboBox
+from PySide6.QtWidgets import (
+    QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+)
 
 from packages.resonance_shared.passenger_parameters import (
     DEFAULT_PASSENGER_OPTIONS, normalize_passenger_options,
 )
+from ..trade_catalog import load_passenger_recruitment_city_options
+from .freight_city_dialog import FreightCityDialog
 from .freight_parameter_widgets import FreightSwitch, parameter_row
 
 
@@ -20,6 +24,8 @@ class FreightPassengerPanel(QWidget):
         super().__init__(parent)
         self._restoring = False
         self._available = True
+        self._recruitment_city_options = load_passenger_recruitment_city_options()
+        self._eligible_recruitment_city_ids = {city_id for city_id, _ in self._recruitment_city_options}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.enabled = FreightSwitch("附加客运", self)
@@ -31,6 +37,10 @@ class FreightPassengerPanel(QWidget):
         self.fields = QWidget(self)
         form = QFormLayout(self.fields)
         form.setContentsMargins(0, 0, 0, 0)
+        self.recruitment_cities_button = QPushButton(self.fields)
+        self.recruitment_cities_button.setToolTip("仅在勾选的站点揽客。清空后，本次货运跳过揽客。")
+        self.recruitment_cities_button.clicked.connect(self._edit_recruitment_cities)
+        form.addRow("揽客站点", self.recruitment_cities_button)
         self.flyer_target = self._spin(0, 2147483647)
         self.flyer_target.setSpecialValueText("自动按客运等级计算")
         self.transport_level = self._spin(1, 100)
@@ -85,6 +95,24 @@ class FreightPassengerPanel(QWidget):
         if not self._restoring:
             self.changed.emit()
 
+    def _set_recruitment_cities(self, city_ids: set[str]) -> None:
+        self._recruitment_city_ids = city_ids & self._eligible_recruitment_city_ids
+        count = len(self._recruitment_city_ids)
+        total = len(self._eligible_recruitment_city_ids)
+        self.recruitment_cities_button.setText(
+            f"全部 {total} 站" if count == total else f"已选 {count} / {total} 站"
+        )
+
+    def _edit_recruitment_cities(self) -> None:
+        dialog = FreightCityDialog(
+            self, self._recruitment_city_ids, city_options=self._recruitment_city_options,
+            title="选择揽客站点", selection_hint="仅在所选站点揽客",
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted and self.recruitment_cities_button.isEnabled():
+            self._set_recruitment_cities(dialog.selected_city_ids())
+            self._changed()
+        dialog.deleteLater()
+
     def set_available(self, available: bool, *, busy: bool = False):
         self._available = available
         self.enabled.setEnabled(available and not busy)
@@ -97,6 +125,10 @@ class FreightPassengerPanel(QWidget):
         self._restoring = True
         try:
             self.enabled.setChecked(bool(enabled))
+            selected = values["recruitment_city_ids"]
+            self._set_recruitment_cities(
+                self._eligible_recruitment_city_ids if selected is None else set(selected)
+            )
             for key in ("flyer_target", "transport_level", "seat_capacity", "seat_level", "furniture_bonus_bps", "cleanliness_bps"):
                 getattr(self, key).setValue((values[key] or 0) / 100 if key.endswith("_bps") else (values[key] or 0))
             for key, field in self.scores.items():
@@ -111,6 +143,10 @@ class FreightPassengerPanel(QWidget):
         for key in ("furniture_bonus_bps", "cleanliness_bps"):
             values[key] = round(values[key] * 100)
         values["seat_capacity"] = values["seat_capacity"] or None
+        if self._recruitment_city_ids != self._eligible_recruitment_city_ids:
+            values["recruitment_city_ids"] = [
+                city_id for city_id, _ in self._recruitment_city_options if city_id in self._recruitment_city_ids
+            ]
         values.update(scores={key: field.value() for key, field in self.scores.items()}, news="none")
         if validate and values["seat_capacity"] is None:
             raise ValueError("请填写附加客运的实际座位数。")

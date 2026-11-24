@@ -46,6 +46,12 @@ def trade_meta_path(filename: str) -> Path:
     raise FileNotFoundError(f"找不到跑商元数据 {filename}，已搜索：\n{searched}")
 
 
+def load_passenger_recruitment_city_options() -> tuple[tuple[str, str], ...]:
+    catalog = _load_json_object(trade_meta_path("passenger_commerce_model.json"))["cities"]
+    return tuple((city_id, city["name"]) for city_id, city in catalog.items()
+                 if city.get("leaflet_enabled") and city.get("spots"))
+
+
 def load_trade_product_groups() -> tuple[TradeProductGroup, ...]:
     product_payload = _load_json_object(trade_meta_path("products.json"))
     unlock_payload = _load_json_object(trade_meta_path("product_unlocks.json"))

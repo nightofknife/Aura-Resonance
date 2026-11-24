@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from packages.resonance_gui.config_repository import ResonanceConfigRepository
 from packages.resonance_gui.logic import (
@@ -18,6 +18,7 @@ from packages.resonance_gui.logic import (
     extract_freight_passenger_cleanup_evidence,
 )
 from packages.resonance_gui.widgets.trade_page import TradePage
+from packages.resonance_gui.widgets.freight_city_dialog import FreightCityDialog
 from tests.unit.test_workflow_recovery_refresh import window
 
 
@@ -84,6 +85,40 @@ def test_fixed_mode_disables_attached_without_erasing_free_draft(page):
                                     "passenger_options": {"seat_capacity": 64}})
 
 
+def test_recruitment_city_dialog_defaults_to_native_stations_and_persists_subset(page, monkeypatch):
+    panel = page.passenger_panel
+    page.auto_passenger.setChecked(True)
+    panel.seat_capacity.setValue(64)
+    assert panel.collect_options()["recruitment_city_ids"] is None
+    freight_cities = page.selected_city_ids()
+
+    def choose_cape_city(dialog):
+        assert dialog.selected_city_ids() == dialog.city_buttons.keys()
+        assert "17" not in dialog.city_buttons
+        assert "7" in dialog.city_buttons
+        dialog._set_all(False)
+        dialog.city_buttons["11"].setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(FreightCityDialog, "exec", choose_cape_city)
+    panel.recruitment_cities_button.click()
+    page.save_ui_state()
+    page.set_inputs(page._settings.load_trade_inputs())
+    assert page.collect_task_inputs()["passenger_options"]["recruitment_city_ids"] == ["11"]
+    assert page.selected_city_ids() == freight_cities
+
+    def clear_cities(dialog):
+        assert dialog.selected_city_ids() == {"11"}
+        dialog._set_all(False)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(FreightCityDialog, "exec", clear_cities)
+    panel.recruitment_cities_button.click()
+    page.save_ui_state()
+    page.set_inputs(page._settings.load_trade_inputs())
+    assert page.collect_task_inputs()["passenger_options"]["recruitment_city_ids"] == []
+
+
 def test_preview_contains_attachment_and_old_settings_default_off(tmp_path):
     app = QApplication.instance() or QApplication([])
     settings = ResonanceConfigRepository(QSettings(str(tmp_path / "preview.ini"), QSettings.IniFormat))
@@ -92,13 +127,16 @@ def test_preview_contains_attachment_and_old_settings_default_off(tmp_path):
     try:
         widget.passenger_panel.seat_capacity.setValue(64)
         widget.auto_passenger.setChecked(True)
+        widget.passenger_panel.set_options(True, {"seat_capacity": 64, "recruitment_city_ids": ["1"]})
         widget.start_city.setCurrentIndex(widget.start_city.findData("1"))
         snapshot = widget.collect_task_inputs(preview=True)
         assert snapshot["auto_passenger"] is True
         assert snapshot["passenger_options"]["seat_capacity"] == 64
+        assert snapshot["passenger_options"]["recruitment_city_ids"] == ["1"]
         assert "auto_trailer" not in snapshot
         widget.save_ui_state()
         assert settings.load_trade_preview_inputs()["passenger_options"]["seat_capacity"] == 64
+        assert settings.load_trade_preview_inputs()["passenger_options"]["recruitment_city_ids"] == ["1"]
     finally:
         widget.close()
         app.processEvents()
