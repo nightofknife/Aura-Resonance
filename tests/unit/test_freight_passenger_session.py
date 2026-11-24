@@ -10,8 +10,11 @@ from plans.resonance_pc.src.actions import _freight_passenger_session as m
 from plans.resonance_pc.src.actions.passenger_pc_actions import PassengerPcError
 
 
-ROUTE = [{"from_city": "A", "to_city": "B"}, {"from_city": "B", "to_city": "C"},
-         {"from_city": "C", "to_city": "D"}]
+ROUTE = [
+    {"from_city": "A", "from_city_id": "1", "to_city": "B", "to_city_id": "2"},
+    {"from_city": "B", "from_city_id": "2", "to_city": "C", "to_city_id": "3"},
+    {"from_city": "C", "from_city_id": "3", "to_city": "D", "to_city_id": "4"},
+]
 
 
 @pytest.fixture

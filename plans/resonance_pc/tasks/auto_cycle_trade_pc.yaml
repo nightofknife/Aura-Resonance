@@ -1424,6 +1424,12 @@ auto_cycle_trade_pc:
         required: false
         default: {}
         properties:
+          recruitment_city_ids:
+            name: recruitment_city_ids
+            type: list
+            nullable: true
+            required: false
+            description: 允许揽客的站点 ID。省略或 null 使用全部支持揽客的站点，空列表跳过揽客。
           flyer_target:
             type: number
             strict_integer: true

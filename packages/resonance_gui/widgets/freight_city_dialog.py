@@ -12,10 +12,13 @@ class FreightCityDialog(QDialog):
     def __init__(
         self, parent: QWidget, selected: set[str], *,
         eligible: set[str] | None = None, automatic: bool = False,
+        city_options: tuple[tuple[str, str], ...] = PC_TRADE_CITY_OPTIONS,
+        title: str | None = None, selection_hint: str = "至少选择两城",
     ) -> None:
         super().__init__(parent)
         self._eligible = eligible
-        self.setWindowTitle("选择参与规划城市" if eligible is None else "设置终点")
+        self._selection_hint = selection_hint
+        self.setWindowTitle(title or ("选择参与规划城市" if eligible is None else "设置终点"))
         self.resize(460, 420)
         layout = QVBoxLayout(self)
         self.automatic = QCheckBox("由程序自动选择终点", self)
@@ -27,7 +30,7 @@ class FreightCityDialog(QDialog):
 
         grid = QGridLayout()
         self.city_buttons: dict[str, QPushButton] = {}
-        for index, (city_id, name) in enumerate(PC_TRADE_CITY_OPTIONS):
+        for index, (city_id, name) in enumerate(city_options):
             button = QPushButton(name, self)
             button.setCheckable(True)
             button.setChecked(city_id in selected)
@@ -67,7 +70,7 @@ class FreightCityDialog(QDialog):
     def _update_selection(self) -> None:
         count = len(self.selected_city_ids())
         if self._eligible is None:
-            self.selection_note.setText(f"已选 {count} / {len(self.city_buttons)} 城 · 至少选择两城")
+            self.selection_note.setText(f"已选 {count} / {len(self.city_buttons)} 城 · {self._selection_hint}")
             return
         automatic = self.automatic.isChecked()
         self.selection_note.setText("终点由程序自动选择" if automatic else f"已选 {count} 个终点，可多选")

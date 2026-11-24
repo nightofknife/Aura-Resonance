@@ -117,20 +117,30 @@ def _expected_extra(spot: dict, options: dict, model: dict) -> float:
     return extra
 
 
+def _recruitment_spot(city_id: str, options: dict, prestige: Any, model: dict) -> dict | None:
+    selected = options["recruitment_city_ids"]
+    city = model["cities"].get(city_id, {})
+    if (selected is not None and city_id not in selected) or not city.get("leaflet_enabled"):
+        return None
+    city_prestige = _prestige(city_id, prestige)
+    if city_prestige < city.get("leaflet_unlock", 0):
+        return None
+    spots = (spot for spot in city.get("spots", []) if spot["unlock_prestige"] <= city_prestige)
+    # Match the UI action's highest/rightmost unlocked recruitment place.
+    return max(spots, key=lambda row: (row["order"], row["id"]), default=None)
+
+
+def can_recruit_from(city_id: str, options: dict, prestige: Any) -> bool:
+    return _recruitment_spot(city_id, options, prestige, _load_model()) is not None
+
+
 def _trip_candidates(visits: list[dict], options: dict, prestige: Any, start: int, model: dict) -> dict[int, list[dict]]:
     candidates: dict[int, list[dict]] = {}
     for i in range(start, len(visits) - 1):
         source = visits[i]
-        city = model["cities"].get(source["city_id"], {})
-        if (not city.get("leaflet_enabled")
-                or _prestige(source["city_id"], prestige) < city.get("leaflet_unlock", 0)):
+        spot = _recruitment_spot(source["city_id"], options, prestige, model)
+        if spot is None:
             continue
-        spots = [spot for spot in city.get("spots", [])
-                 if spot["unlock_prestige"] <= _prestige(source["city_id"], prestige)]
-        if not spots:
-            continue
-        # Match the UI action's highest/rightmost unlocked recruitment place.
-        spot = max(spots, key=lambda row: (row["order"], row["id"]))
         seen = {source["city_id"]}
         for j in range(i + 1, len(visits)):
             destination = visits[j]

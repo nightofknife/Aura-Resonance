@@ -105,6 +105,28 @@ def test_cross_stop_batch_does_not_recruit_or_settle_at_intermediate_stop(attach
     assert operations.index("passenger_settle") < operations.index("final_sale")
 
 
+@pytest.mark.parametrize("start_city_id,start_city,start_city_key,selected", [
+    ("17", "塔图站", "tatu_station", None),
+    ("15", "岚心城", "lanxin_city", ["11"]),
+])
+def test_initial_inventory_waits_for_recruitment_city(
+    attached, monkeypatch, start_city_id, start_city, start_city_key, selected,
+):
+    operations, state = attached
+    route = routes()
+    route[0].update(from_city_id=start_city_id, from_city=start_city, from_city_key=start_city_key)
+    state["city"].update(city_name=start_city, city_key=start_city_key)
+    monkeypatch.setattr(trade, "resonance_pc_trade_plan_optimal_route",
+                        lambda **kw: {"status": "ok", "route": deepcopy(route)})
+    result = run_full(auto_passenger=True, passenger_options={
+        "seat_capacity": 64, "flyer_target": 10, "recruitment_city_ids": selected,
+    }, auto_sparkling_water=False)
+    assert result["success"] is True and result["route"] == route
+    assert operations.count("passenger_inventory") == 1
+    assert operations.index("travel:0") < operations.index("passenger_inventory") < operations.index("recruit:岚心城")
+    assert operations.index("travel:1") < operations.index("passenger_settle") < operations.index("final_sale")
+
+
 def test_settlement_precedes_arrival_investment(attached, monkeypatch):
     operations, _ = attached
 
