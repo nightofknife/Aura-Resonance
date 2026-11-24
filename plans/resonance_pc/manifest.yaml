@@ -1038,6 +1038,23 @@ exports:
       type: Any
       required: false
       default: 60.0
+  - name: resonance_pc.enter_city_shop
+    module: plans.resonance_pc.src.actions.city_shop_navigation_pc_actions
+    function: resonance_pc_enter_city_shop
+    public: true
+    read_only: false
+    timeout: null
+    description: Enter the requested shop from the current city panel and confirm
+      its menu.
+    parameters:
+    - name: shop_name
+      type: Any
+      required: true
+      default: null
+    - name: city_name
+      type: Any
+      required: false
+      default: null
   - name: resonance_pc.open_city_panel_from_main
     module: plans.resonance_pc.src.actions.city_trade_flow_pc_actions
     function: resonance_pc_open_city_panel_from_main
@@ -2075,8 +2092,8 @@ exports:
     public: true
     read_only: false
     timeout: null
-    description: Collect daily mission/activity rewards only when the main-screen
-      reminder is visible, then confirm return to main.
+    description: Open daily missions, collect available mission and activity rewards,
+      and confirm return to main.
     parameters: []
   - name: resonance_pc.collect_battle_pass_rewards
     module: plans.resonance_pc.src.actions.daily_reward_pc_actions
@@ -2084,8 +2101,8 @@ exports:
     public: true
     read_only: false
     timeout: null
-    description: Collect completed tasks and unlocked rewards for every pass when
-      its main-screen star has a reminder, then return to main.
+    description: Open the battle pass, check and collect available rewards, then confirm
+      return to main.
     parameters: []
   - name: resonance_pc.eternal_scuffle_initialize
     module: plans.resonance_pc.src.actions.eternal_scuffle_pc_actions
@@ -3130,6 +3147,19 @@ exports:
       type: Any
       required: true
       default: null
+  - name: resonance_pc.open_from_station_main
+    module: plans.resonance_pc.src.actions.station_main_navigation_pc_actions
+    function: resonance_pc_open_from_station_main
+    public: true
+    read_only: false
+    timeout: null
+    description: Open the requested page from the PC station main screen and confirm
+      it is ready.
+    parameters:
+    - name: target
+      type: Any
+      required: true
+      default: null
   - name: resonance_pc.run_structural_exploration
     module: plans.resonance_pc.src.actions.structural_exploration_pc_actions
     function: resonance_pc_run_structural_exploration
@@ -3648,15 +3678,21 @@ exports:
   - id: daily_rewards_pc/collect_daily_mission_rewards_pc
     title: 每日任务奖励
     source: tasks/daily_rewards_pc.yaml
-    description: 从站场主界面启动，仅在任务入口带红点时进入每日活跃页，领取已完成任务与活跃奖励，确认关闭奖励弹层并返回主界面。
+    description: 从站场主界面打开每日活跃页，检查并领取可领取的任务与活跃奖励，然后返回主界面。
     role: user_task
     domain: 日常奖励
   - id: daily_rewards_pc/collect_battle_pass_rewards_pc
     title: 通行证奖励
     source: tasks/daily_rewards_pc.yaml
-    description: 从站场主界面启动，仅在星形入口带红点时进入通行证，逐个领取已完成的每日和每周任务奖励、已解锁等级奖励，并确认返回主界面。
+    description: 从站场主界面打开通行证，检查并领取可领取的任务与等级奖励，然后返回主界面。
     role: user_task
     domain: 日常奖励
+  - id: enter_city_shop_pc/enter_city_shop_pc
+    title: 进入城市商店
+    source: tasks/enter_city_shop_pc.yaml
+    description: 请先打开当前城市的建筑面板。选择目标店铺，任务确认目标页面就绪后结束。
+    role: user_task
+    domain: 商贸运输
   - id: enter_reforming_center_pc/enter_reforming_center_pc
     title: Enter Reforming Center (PC)
     source: tasks/enter_reforming_center_pc.yaml
@@ -3730,6 +3766,12 @@ exports:
     description: 从普通总览进入指定原料车间，预存最多、有限循环补工作、开始生产后有限循环补替补，最终状态确认后返回普通总览；不终止、不加速、不改配方、不领取、不建设。
     role: internal
     domain: 整顿中心
+  - id: open_from_station_main_pc/open_from_station_main_pc
+    title: 从站场主界面打开页面
+    source: tasks/open_from_station_main_pc.yaml
+    description: 请先回到站场主界面。选择要打开的页面，任务确认页面就绪后结束。
+    role: user_task
+    domain: 常用工具
   - id: open_reforming_center_room_pc/open_reforming_center_room_pc
     title: Open Reforming Center Room (PC)
     source: tasks/open_reforming_center_room_pc.yaml
@@ -3810,4 +3852,4 @@ exports:
     domain: 整顿中心
 metadata:
   generated_by: ManifestGenerator
-  generated_at: '2026-11-22T13:02:39Z'
+  generated_at: '2026-11-24T15:23:33Z'

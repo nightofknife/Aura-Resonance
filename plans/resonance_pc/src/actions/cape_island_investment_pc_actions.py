@@ -14,6 +14,7 @@ import cv2
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.engine import ExecutionEngine
 from packages.aura_core.observability.logging.core_logger import logger
+from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from ....aura_base.src.actions.vision_actions import find_best_template_in_set, find_image
 from ....aura_base.src.actions.wait_actions import (
     wait_for_image,
@@ -21,6 +22,11 @@ from ....aura_base.src.actions.wait_actions import (
 )
 
 from ..services.city_shop_data_pc_service import ResonancePcCityShopDataService
+from ._city_shop_entry import CityShopEntryError
+from ._navigation_templates import (
+    MIRAGE_ISLAND_HOME, MIRAGE_ISLAND_INVESTMENT, MIRAGE_ISLAND_INVESTMENT_SUCCESS, MIRAGE_ISLAND_REVENUE,
+)
+from .city_shop_navigation_pc_actions import enter_resolved_city_shop
 
 
 class CapeIslandInvestmentError(RuntimeError):
@@ -40,12 +46,12 @@ _CAPE_CITY_NAME = "海角城"
 _MIRAGE_ISLAND_NAME = "蜃息岛"
 
 # Page and command templates are populated independently from card grade samples.
-_ISLAND_HOME_TEMPLATE = "templates/commerce/investment/cape_island/controls/home_anchor.png"
-_REVENUE_OVERVIEW_TEMPLATE = "templates/commerce/investment/cape_island/controls/revenue_overview_anchor.png"
+_ISLAND_HOME_TEMPLATE = MIRAGE_ISLAND_HOME.path
+_REVENUE_OVERVIEW_TEMPLATE = MIRAGE_ISLAND_REVENUE.path
 _INVESTMENT_TAB_TEMPLATE = "templates/commerce/investment/cape_island/controls/investment_tab.png"
-_INVESTMENT_PAGE_TEMPLATE = "templates/commerce/investment/cape_island/controls/investment_page_anchor.png"
+_INVESTMENT_PAGE_TEMPLATE = MIRAGE_ISLAND_INVESTMENT.path
 _INVEST_BUTTON_TEMPLATE = "templates/commerce/investment/cape_island/controls/invest_button.png"
-_INVESTMENT_SUCCESS_TEMPLATE = "templates/commerce/investment/cape_island/controls/investment_success.png"
+_INVESTMENT_SUCCESS_TEMPLATE = MIRAGE_ISLAND_INVESTMENT_SUCCESS.path
 
 CARD_OPTION_TEMPLATES: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "share": {
@@ -76,11 +82,11 @@ _CARD_TEMPLATE_METADATA = {
     for template in templates
 }
 
-_ISLAND_HOME_REGION = (0, 60, 1280, 660)
-_REVENUE_OVERVIEW_REGION = (610, 135, 300, 90)
+_ISLAND_HOME_REGION = MIRAGE_ISLAND_HOME.roi
+_REVENUE_OVERVIEW_REGION = MIRAGE_ISLAND_REVENUE.roi
 _INVESTMENT_TAB_REGION = (920, 70, 350, 90)
-_INVESTMENT_PAGE_REGION = (590, 130, 690, 570)
-_INVESTMENT_SUCCESS_REGION = (500, 180, 300, 350)
+_INVESTMENT_PAGE_REGION = MIRAGE_ISLAND_INVESTMENT.roi
+_INVESTMENT_SUCCESS_REGION = MIRAGE_ISLAND_INVESTMENT_SUCCESS.roi
 
 # WGC client coordinates, excluding the window title bar.
 _INCOME_ENTRY_REGION = (80, 570, 200, 150)
@@ -444,49 +450,30 @@ def _select_investment_option(
 async def _enter_island(
     app: Any,
     vision: Any,
-    engine: ExecutionEngine,
     city_shop_data: ResonancePcCityShopDataService,
     *,
     location_file_path: str,
-    page_timeout_sec: float,
-    interval_sec: float,
     transition_attempts: int,
+    interaction=None,
 ) -> Dict[str, Any]:
     point = city_shop_data.resolve_shop_point(
         city_name=_CAPE_CITY_NAME,
         shop_name=_MIRAGE_ISLAND_NAME,
         location_file_path=location_file_path,
     )
-    last_match: Dict[str, Any] = {}
-    for attempt in range(1, max(int(transition_attempts), 1) + 1):
-        app.click(x=int(point["x"]), y=int(point["y"]))
-        match = await wait_for_image(
-            app=app,
-            vision=vision,
-            engine=engine,
-            template=_ISLAND_HOME_TEMPLATE,
-            timeout=page_timeout_sec,
-            interval=interval_sec,
-            region=_ISLAND_HOME_REGION,
-            threshold=0.86,
+    try:
+        entered = await tracked_to_thread(
+            enter_resolved_city_shop, point, app=app, vision=vision,
+            city_panel_confirmed=True, max_clicks=transition_attempts, interaction=interaction,
         )
-        last_match = _match_payload(
-            match,
-            template=_ISLAND_HOME_TEMPLATE,
-            region=_ISLAND_HOME_REGION,
-        )
-        if match.found:
-            return {
-                "attempts": attempt,
-                "click": point,
-                "match": last_match,
-            }
-    _raise_error(
-        "cape_island_entry_timeout",
-        "clicked the Cape City island coordinate but the island page was not confirmed",
-        {"click": point, "attempts": max(int(transition_attempts), 1), "last_match": last_match},
-    )
-    return {}
+    except CityShopEntryError as exc:
+        detail = dict(exc.detail)
+        detail.update(click=point, attempts=detail.get("click_attempts", 0),
+                      last_match=(detail.get("last_observation") or {}).get("menu"))
+        code = "cape_island_entry_timeout" if exc.code == "city_shop_entry_timeout" else exc.code
+        _raise_error(code, exc.message, detail)
+    return {"attempts": entered["click_attempts"], "click": point,
+            "match": entered["last_observation"]["menu"]}
 
 
 async def _open_revenue_overview(
@@ -514,7 +501,7 @@ async def _open_revenue_overview(
         match = await asyncio.to_thread(
             find_image, app=app, vision=vision, engine=engine,
             template=_REVENUE_OVERVIEW_TEMPLATE,
-            region=_REVENUE_OVERVIEW_REGION, threshold=0.86,
+            region=_REVENUE_OVERVIEW_REGION, threshold=MIRAGE_ISLAND_REVENUE.threshold,
         )
         overview_match = _match_payload(
             match, template=_REVENUE_OVERVIEW_TEMPLATE, region=_REVENUE_OVERVIEW_REGION,
@@ -533,7 +520,7 @@ async def _open_revenue_overview(
         stable = 0
         home = await asyncio.to_thread(
             find_image, app=app, vision=vision, engine=engine,
-            template=_ISLAND_HOME_TEMPLATE, region=_ISLAND_HOME_REGION, threshold=0.86,
+            template=_ISLAND_HOME_TEMPLATE, region=_ISLAND_HOME_REGION, threshold=MIRAGE_ISLAND_HOME.threshold,
         )
         home_match = _match_payload(home, template=_ISLAND_HOME_TEMPLATE, region=_ISLAND_HOME_REGION)
         if (home.debug_info or {}).get("error"):
@@ -597,6 +584,7 @@ async def _open_revenue_overview(
     app="plans/aura_base/app",
     ocr="plans/aura_base/ocr",
     vision="plans/aura_base/vision",
+    interaction="plans/aura_base/interaction",
     resonance_pc_city_shop_data="resonance_pc_city_shop_data",
 )
 async def resonance_pc_execute_cape_island_investment_from_city_panel(
@@ -612,6 +600,7 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
     vision: Any = None,
     resonance_pc_city_shop_data: ResonancePcCityShopDataService | None = None,
     engine: ExecutionEngine | None = None,
+    interaction=None,
 ) -> Dict[str, Any]:
     if (
         app is None
@@ -626,12 +615,10 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
     island_entry = await _enter_island(
         app,
         vision,
-        engine,
         resonance_pc_city_shop_data,
         location_file_path=location_file_path,
-        page_timeout_sec=page_timeout_sec,
-        interval_sec=interval_sec,
         transition_attempts=transition_attempts,
+        interaction=interaction,
     )
     revenue_overview = await _open_revenue_overview(
         app,
@@ -659,7 +646,7 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
         timeout=page_timeout_sec,
         interval=interval_sec,
         region=_INVESTMENT_PAGE_REGION,
-        threshold=0.86,
+        threshold=MIRAGE_ISLAND_INVESTMENT.threshold,
     )
     investment_page = _match_payload(
         investment_page_match,
@@ -802,7 +789,7 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
         timeout=page_timeout_sec,
         interval=interval_sec,
         region=_INVESTMENT_SUCCESS_REGION,
-        threshold=0.86,
+        threshold=MIRAGE_ISLAND_INVESTMENT_SUCCESS.threshold,
     )
     success_match = _match_payload(
         success_result,
@@ -824,7 +811,7 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
         timeout=page_timeout_sec,
         interval=interval_sec,
         region=_INVESTMENT_SUCCESS_REGION,
-        threshold=0.86,
+        threshold=MIRAGE_ISLAND_INVESTMENT_SUCCESS.threshold,
     )
     dismissed = {
         "found": not bool(disappeared),
@@ -839,7 +826,7 @@ async def resonance_pc_execute_cape_island_investment_from_city_panel(
         timeout=page_timeout_sec,
         interval=interval_sec,
         region=_INVESTMENT_PAGE_REGION,
-        threshold=0.86,
+        threshold=MIRAGE_ISLAND_INVESTMENT.threshold,
     )
     returned_page = _match_payload(
         returned_result,

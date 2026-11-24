@@ -25,7 +25,7 @@ class DailyRewardsPanel(QWidget):
         title.setObjectName("workflowTitle")
         layout.addWidget(title)
         note = QLabel(
-            "请从站场主界面启动。每日任务奖励和通行证奖励可分别运行；对应入口有红点才进入，领取后返回主界面。",
+            "请从站场主界面启动。每日任务奖励和通行证奖励可分别运行，进入页面检查可领取项后返回主界面。",
             self,
         )
         note.setWordWrap(True)

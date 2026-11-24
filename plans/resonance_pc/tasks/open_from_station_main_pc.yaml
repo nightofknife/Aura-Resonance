@@ -1,0 +1,25 @@
+open_from_station_main_pc:
+  meta:
+    role: user_task
+    domain: 常用工具
+    title: 从站场主界面打开页面
+    description: 请先回到站场主界面。选择要打开的页面，任务确认页面就绪后结束。
+    entry_point: true
+    concurrency: exclusive
+    inputs:
+      - name: target
+        type: enum
+        enum: [城市面板, 城际地图, 个人资料, 客运管理, 作战终端, 每日任务, 通行证]
+        required: true
+  steps:
+    open:
+      action: resonance_pc.open_from_station_main
+      params:
+        target: "{{ inputs.target }}"
+  returns:
+    success: "{{ nodes.open.output.success }}"
+    target: "{{ nodes.open.output.target }}"
+    page_state: "{{ nodes.open.output.page_state }}"
+    click_attempts: "{{ nodes.open.output.click_attempts }}"
+    clicks: "{{ nodes.open.output.clicks }}"
+    last_observation: "{{ nodes.open.output.last_observation }}"

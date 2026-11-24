@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 
 class ReformingCenterNavigationError(RuntimeError):
     """Structured failure raised by Reforming Center navigation actions."""
@@ -24,7 +25,6 @@ class ReformingCenterNavigationError(RuntimeError):
         return {"code": self.code, "message": self.message, "detail": self.detail}
 
 
-_PROFILE_AVATAR_POINT = (155, 660)
 _MAIN_MARKER_REGION = (1000, 420, 280, 120)
 _PROFILE_MENU_REGION = (500, 540, 200, 180)
 _REFORMING_CENTER_OVERVIEW_REGION = (540, 70, 740, 650)
@@ -312,6 +312,7 @@ def _wait_for_overview(
 @requires_services(
     app="plans/aura_base/app",
     ocr="plans/aura_base/ocr",
+    interaction="plans/aura_base/interaction",
 )
 def resonance_pc_enter_reforming_center(
     main_timeout_sec: float = 5.0,
@@ -321,6 +322,7 @@ def resonance_pc_enter_reforming_center(
     after_profile_click_sec: float = 0.8,
     app: Any = None,
     ocr: Any = None,
+    interaction: Any = None,
 ) -> Dict[str, Any]:
     if app is None or ocr is None:
         _raise_error("missing_service", "app/ocr services are required")
@@ -349,8 +351,10 @@ def resonance_pc_enter_reforming_center(
             {"markers": list(_MAIN_MARKERS), "region": list(_MAIN_MARKER_REGION)},
         )
 
-    app.click(x=_PROFILE_AVATAR_POINT[0], y=_PROFILE_AVATAR_POINT[1])
-    time.sleep(max(float(after_profile_click_sec), 0.0))
+    try:
+        opened = open_station_page("个人资料", app=app, interaction=interaction, check_start=True)
+    except StationMainNavigationError as exc:
+        _raise_error("profile_menu_target_not_found", "未能确认个人资料已打开。", exc.detail)
 
     menu_hit = _wait_for_marker(
         app,
@@ -370,9 +374,8 @@ def resonance_pc_enter_reforming_center(
     menu_x, menu_y = [int(value) for value in menu_hit["center"]]
     app.click(x=menu_x, y=menu_y)
     logger.info(
-        "[ReformingCenterEntry] clicked profile=(%s,%s) target=(%s,%s) text=%s",
-        _PROFILE_AVATAR_POINT[0],
-        _PROFILE_AVATAR_POINT[1],
+        "[ReformingCenterEntry] profile_clicks=%s target=(%s,%s) text=%s",
+        opened["clicks"],
         menu_x,
         menu_y,
         menu_hit.get("text"),

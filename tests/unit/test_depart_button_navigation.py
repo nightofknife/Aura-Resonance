@@ -102,7 +102,7 @@ def test_retained_real_crop_matches_generated_template_with_framework_cpu():
     assert len(vision.calls) == 1
 
 
-def test_return_main_then_open_map_shares_real_departure_evidence(monkeypatch):
+def test_return_main_uses_real_departure_evidence(monkeypatch):
     actual = np.array(Image.open(FIXTURES / "actual-matched-crop.png").convert("RGB"))
     main_image = np.full((100, 160, 3), 17, np.uint8)
     main_image[30:72, 20:126] = actual
@@ -118,11 +118,10 @@ def test_return_main_then_open_map_shares_real_departure_evidence(monkeypatch):
     monkeypatch.setattr(trade, "_wait_template", lambda *args, **kwargs:
                         {"found": True, "center": [205, 40]})
     returned = trade.resonance_pc_go_city_main_direct(app=app, vision=vision)
-    opened = travel._open_intercity_map(app, vision)
-    assert returned["main_ready"]["confirmed"] and opened["transitioned"]
-    assert returned["click_attempts"] == opened["click_attempts"] == 1
-    assert app.clicks == [{"x": 205, "y": 40}, {"x": 1193, "y": 671}]
-    assert len(app.captures) == 7 and all(region == depart.REGION for region in app.captures)
+    assert returned["main_ready"]["confirmed"]
+    assert returned["click_attempts"] == 1
+    assert app.clicks == [{"x": 205, "y": 40}]
+    assert all(region == depart.REGION for region in app.captures)
 
 
 @pytest.mark.parametrize("value", [0, 255])
@@ -331,91 +330,28 @@ def test_return_main_cancellation_before_train_click(monkeypatch):
     assert error.value.code == "trade_cancelled" and not app.clicks
 
 
-def install_open_map(monkeypatch, states, confirmed=True):
-    probes = iter(states)
-    monkeypatch.setattr(travel, "_check_intercity_cancelled", lambda: None)
-    monkeypatch.setattr(travel, "wait_depart_button", lambda **kwargs: ready(confirmed))
-    monkeypatch.setattr(travel, "probe_depart_button", lambda **kwargs: match(next(probes)))
-
-
-def test_open_map_requires_two_absent_frames_after_click_and_keeps_one_second(monkeypatch, clock):
-    install_open_map(monkeypatch, [False, False])
-    probe_times = []
-
-    def absent(**kwargs):
-        probe_times.append(clock.now)
-        return match(False)
-
-    monkeypatch.setattr(travel, "probe_depart_button", absent)
+@pytest.mark.parametrize(("navigation_code", "travel_code"), [
+    ("station_main_entry_not_found", "depart_button_not_found"),
+    ("station_main_transition_timeout", "depart_transition_unconfirmed"),
+])
+def test_open_map_preserves_caller_error_codes(monkeypatch, navigation_code, travel_code):
     app = App()
-    result = travel._open_intercity_map(app, object())
-    assert result["transitioned"] and result["click_attempts"] == 1
-    assert app.clicks == [{"x": 1200, "y": 670}]
-    # The full initial settling delay and distinct confirmation frames remain;
-    # only sleep granularity changes to make cancellation responsive.
-    assert probe_times == pytest.approx([1., 1.15])
-    assert sum(clock.sleeps) == pytest.approx(1.15)
-    assert all(0 < duration <= .05 for duration in clock.sleeps)
-
-
-def test_open_map_lost_click_retries_once_on_two_present_frames(monkeypatch):
-    install_open_map(monkeypatch, [True, True, False, False])
-    app = App()
-    assert travel._open_intercity_map(app, object())["click_attempts"] == 2
-    assert len(app.clicks) == 2
-
-
-def test_open_map_still_present_after_two_clicks_is_failure(monkeypatch):
-    install_open_map(monkeypatch, [True, True, True, True])
-    app = App()
+    evidence = {"click_attempts": 0 if navigation_code == "station_main_entry_not_found" else 1}
+    def failed(target, **kwargs):
+        assert target == "城际地图"
+        raise travel.StationMainNavigationError(navigation_code, "Map not confirmed", evidence)
+    monkeypatch.setattr(travel, "open_station_page", failed)
     with pytest.raises(travel.IntercityDestinationError) as error:
         travel._open_intercity_map(app, object())
-    assert error.value.code == "depart_transition_unconfirmed" and len(app.clicks) == 2
+    assert error.value.code == travel_code and error.value.detail == evidence
 
 
-def test_open_map_unstable_frames_do_not_allow_retry_or_claim_transition(monkeypatch):
-    install_open_map(monkeypatch, [True, False, True, False, True])
-    app = App()
-    with pytest.raises(travel.IntercityDestinationError) as error:
-        travel._open_intercity_map(app, object())
-    assert error.value.code == "depart_transition_unconfirmed" and len(app.clicks) == 1
-
-
-def test_open_map_initial_unstable_button_never_clicks(monkeypatch):
-    install_open_map(monkeypatch, [], confirmed=False)
-    app = App()
-    with pytest.raises(travel.IntercityDestinationError) as error:
-        travel._open_intercity_map(app, object())
-    assert error.value.code == "depart_button_not_found" and not app.clicks
-
-
-def test_open_map_cancellation_after_first_click_cannot_retry(monkeypatch):
-    install_open_map(monkeypatch, [])
-    app, checks = App(), []
-    def cancelled():
-        checks.append(None)
-        if len(checks) == 2:
-            raise asyncio.CancelledError()
-    monkeypatch.setattr(travel, "_check_intercity_cancelled", cancelled)
-    with pytest.raises(asyncio.CancelledError):
-        travel._open_intercity_map(app, object())
-    assert len(app.clicks) == 1
-
-
-@pytest.mark.parametrize("target", ["trade", "travel"])
-def test_depart_matching_error_propagates_with_no_click(monkeypatch, target):
+def test_depart_matching_error_propagates_with_no_click(monkeypatch):
     app = App()
     def failed(**kwargs):
         raise depart.DepartButtonError("depart_capture_failed", "Capture failed", {"fixture": True})
-    if target == "trade":
-        monkeypatch.setattr(trade, "probe_depart_button", failed)
-        call = lambda: trade.resonance_pc_go_city_main_direct(app=app, vision=object())
-        error_class = trade.CityTradeFlowError
-    else:
-        monkeypatch.setattr(travel, "wait_depart_button", failed)
-        call = lambda: travel._open_intercity_map(app, object())
-        error_class = travel.IntercityDestinationError
-    with pytest.raises(error_class) as error:
-        call()
+    monkeypatch.setattr(trade, "probe_depart_button", failed)
+    with pytest.raises(trade.CityTradeFlowError) as error:
+        trade.resonance_pc_go_city_main_direct(app=app, vision=object())
     assert error.value.code == "depart_capture_failed" and error.value.detail == {"fixture": True}
     assert not app.clicks

@@ -15,6 +15,7 @@ from plans.aura_base.src.services.vision_service import VisionService
 from plans.resonance_pc.src.actions import bento_consumption_pc_actions as bento
 from plans.resonance_pc.src.actions import _bento_consumption_store as storage
 from plans.resonance_pc.src.actions._player_data_persistence import PlayerDataPersistenceError
+from tests.unit.test_station_main_navigation_pc_actions import _profile_frame, _reward_frame
 
 
 FIXTURES = Path("tests/fixtures/bento_consumption")
@@ -191,6 +192,16 @@ def entry_session(tmp_path, monkeypatch, clock, *, misses=0, open_delay=0.0):
     state = {"page": "city_main", "open_at": None, "clicks": [], "moves": []}
     store = PersistentDataService(tmp_path)
     seed_inventory(store)
+    scenes = {"city_main": _reward_frame("daily", "01_city_main"), "profile": _profile_frame()}
+    blank = np.zeros_like(scenes["city_main"])
+
+    base_scope = bento.OperationScope
+
+    class ClockScope(base_scope):
+        def __init__(self, timeout=None, **kwargs):
+            super().__init__(timeout, monotonic=lambda: clock[0], **kwargs)
+
+    monkeypatch.setattr(bento, "OperationScope", ClockScope)
 
     def page():
         if state["open_at"] is not None and clock[0] >= state["open_at"]:
@@ -199,14 +210,18 @@ def entry_session(tmp_path, monkeypatch, clock, *, misses=0, open_delay=0.0):
 
     def click(x, y):
         assert page() == "city_main", "Do not click the entrance on an opened/unknown page"
-        assert (x, y) == bento._CLICK_PROFILE
+        assert (x, y) == (150, 655)
         state["clicks"].append(clock[0])
         if len(state["clicks"]) > misses:
             state.update(page="transition", open_at=clock[0] + open_delay)
 
-    app = NS(click=click, capture=lambda rect: NS(
-        success=True, image=np.zeros((rect[3], rect[2], 3), dtype=np.uint8)))
-    session = bento.BentoConsumptionSession(app, None, None, store, {
+    def capture(rect):
+        x, y, w, h = rect
+        return NS(success=True, image=scenes.get(page(), blank)[y:y+h, x:x+w],
+                  captured_at_monotonic=clock[0] + .001)
+
+    app = NS(click=click, capture=capture, get_window_size=lambda: (1280, 720))
+    session = bento.BentoConsumptionSession(app, None, offline_vision(), store, {
         "total_timeout_sec": 30, "timeout_sec": 5, "poll_interval_sec": .2,
     }, {"click_interval_sec": .7}, {"items": []})
     monkeypatch.setattr(session, "match", lambda key, roi=None, *, frame=None: {"found": page() == "city_main"})
@@ -264,19 +279,18 @@ def test_profile_entry_unknown_page_times_out_without_blind_click(tmp_path, monk
         session.enter()
     assert caught.value.code == "bento_transition_timeout"
     assert len(state["clicks"]) == 1 and not state["moves"]
+    assert clock[0] - state["clicks"][0] == pytest.approx(8.)
 
 
 def test_profile_opening_between_source_and_target_probes_does_not_toggle_closed(tmp_path, monkeypatch, clock):
     session, state, _ = entry_session(tmp_path, monkeypatch, clock, misses=99)
-    original = session.match
+    original = session.app.app.click
 
-    def main(key, roi=None, *, frame=None):
-        result = original(key, roi)
-        if state["clicks"] and clock[0] >= state["clicks"][0] + .7:
-            state["page"] = "profile"
-        return result
+    def delayed_click(x, y):
+        original(x, y)
+        state["open_at"] = clock[0] + 1.25
 
-    monkeypatch.setattr(session, "match", main)
+    monkeypatch.setattr(session.app.app, "click", delayed_click)
     session.enter()
     assert len(state["clicks"]) == 1
     assert session.page == "bento_cabinet"
@@ -295,16 +309,17 @@ def test_profile_entry_cancelled_before_retry_does_not_click_again(tmp_path, mon
 
 def test_profile_entry_probe_error_does_not_trigger_retry(tmp_path, monkeypatch, clock):
     session, state, _ = entry_session(tmp_path, monkeypatch, clock, misses=99)
+    original = session.app.app.capture
 
-    def target(_, *, frame=None):
+    def capture(rect):
         if state["clicks"]:
-            session.fail("bento_capture_failed", "capture failed")
-        return False
+            return NS(success=False, image=None, error_message="capture failed")
+        return original(rect)
 
-    monkeypatch.setattr(session.reader, "is_page", target)
+    monkeypatch.setattr(session.app.app, "capture", capture)
     with pytest.raises(bento.BentoConsumptionError) as caught:
         session.enter()
-    assert caught.value.code == "bento_capture_failed"
+    assert caught.value.code == "bento_transition_timeout"
     assert len(state["clicks"]) == 1 and not state["moves"]
 
 

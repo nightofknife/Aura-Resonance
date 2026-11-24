@@ -104,6 +104,7 @@ def is_rubbish_recycling_arrival(leg: Mapping[str, Any]) -> bool:
 @requires_services(
     app="plans/aura_base/app",
     vision="plans/aura_base/vision",
+    interaction="plans/aura_base/interaction",
     resonance_pc_city_shop_data="resonance_pc_city_shop_data",
 )
 def resonance_pc_execute_rubbish_recycling_from_city_panel(
@@ -112,10 +113,11 @@ def resonance_pc_execute_rubbish_recycling_from_city_panel(
     app: Any = None,
     vision: Any = None,
     resonance_pc_city_shop_data: ResonancePcCityShopDataService | None = None,
+    interaction=None,
 ) -> Dict[str, Any]:
     return _execute_rubbish_recycling_from_city_panel(
         city_name=city_name, location_file_path=location_file_path,
-        app=app, vision=vision, resonance_pc_city_shop_data=resonance_pc_city_shop_data,
+        app=app, vision=vision, resonance_pc_city_shop_data=resonance_pc_city_shop_data, interaction=interaction,
     )
 
 
@@ -124,6 +126,7 @@ def _execute_rubbish_recycling_from_city_panel(
     resonance_pc_city_shop_data: ResonancePcCityShopDataService | None,
     location_file_path: str = _LOCATION_PATH,
     city_panel_confirmed: bool = False,
+    interaction=None,
 ) -> Dict[str, Any]:
     _check_cancelled()
     if app is None or vision is None or resonance_pc_city_shop_data is None:
@@ -146,7 +149,7 @@ def _execute_rubbish_recycling_from_city_panel(
     )
     result = run_rubbish_recycling(
         city=city, station=point, app=app, vision=vision, check_cancelled=_check_cancelled,
-        city_panel_confirmed=city_panel_confirmed,
+        city_panel_confirmed=city_panel_confirmed, interaction=interaction,
     )
     logger.info(
         "Rubbish recycling completed city=%s status=%s initial_state=%s final_state=%s elapsed_ms=%s",

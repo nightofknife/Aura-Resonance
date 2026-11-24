@@ -15,7 +15,7 @@ from ._depart_button_vision import load_depart_profile
 
 
 PLAN = Path(__file__).resolve().parents[2]
-REQUIRED = ("main_entry_with_red", "daily_tab", "claimable", "activity_gold",
+REQUIRED = ("daily_tab", "claimable", "activity_gold",
             "activity_blue", "reward_title", "reward_exit", "city_main")
 
 
@@ -143,6 +143,5 @@ class DailyRewardReader:
             if all(match(key) != "unknown" for key in controls):
                 return RewardPage(frame, "daily", hits)
         elif daily_tab == "absent" and match("main_screen") == "present":
-            if match("main_entry_with_red") != "unknown":
-                return RewardPage(frame, "main", hits)
+            return RewardPage(frame, "main", hits)
         return RewardPage(frame, "unknown", hits)

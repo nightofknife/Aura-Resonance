@@ -18,13 +18,16 @@ from packages.aura_core.context.persistence.persistent_data_service import Persi
 from packages.aura_core.observability.logging.core_logger import current_cid, logger
 from packages.aura_core.observability.failure_evidence import save_evidence_png
 from packages.aura_core.observability.logging.log_session import get_log_session
+from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from ....aura_base.src.actions._shared import poll_until
 from ....aura_base.src.actions.input_actions import click as aura_click
+from ....aura_base.src.services.interaction_service import InteractionService
 from ....aura_base.src.services.observation_service import CaptureError, Frame, ObservationService
 from ._player_data_persistence import USER_INFO_FILE, load_pc_user_info
-from ._city_shop_entry import CityShopEntryError, enter_city_shop
+from ._city_shop_entry import CityShopEntryError
 from ._recovery_assets import read_layout_json, resolve_plan_asset
+from .city_shop_navigation_pc_actions import enter_resolved_city_shop
 
 PLAN_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PLAN_ROOT / "data/meta/sparkling_water.json"
@@ -183,12 +186,15 @@ class SparklingWaterSession:
         try:
             frame = self._observation.capture_regions(regions)
         except CaptureError as exc:
-            _check_cancelled()
-            if exc.reason == "capture_size_invalid":
-                self.fail("sparkling_water_capture_size_invalid", "Sparkling water ROI capture has unexpected dimensions")
-            self.fail("sparkling_water_capture_failed", "Sparkling water capture failed")
+            self._fail_capture(exc)
         _check_cancelled()
         return frame
+
+    def _fail_capture(self, exc: CaptureError, detail: dict | None = None):
+        _check_cancelled()
+        if exc.reason == "capture_size_invalid":
+            self.fail("sparkling_water_capture_size_invalid", "Sparkling water ROI capture has unexpected dimensions", detail)
+        self.fail("sparkling_water_capture_failed", "Sparkling water capture failed", detail)
 
     def capture(self, roi: list[int], *, frame: Frame | None = None) -> np.ndarray:
         _check_cancelled()
@@ -311,21 +317,25 @@ class SparklingWaterSession:
     async def enter_rest(self, point: dict) -> None:
         self.stage = "enter_rest"
 
-        def rest_menu() -> dict:
+        def rest_menu(frame, scope) -> dict:
             try:
-                return self.match("rest_menu")
+                match = self.match("rest_menu", frame=frame)
+                scope.checkpoint()
+                return {"valid": True, **match}
             except _UncertainFrame:
                 return {"valid": False, "found": False, "confidence": None}
 
         try:
-            await asyncio.to_thread(
-                enter_city_shop, app=self.app, vision=self.vision, point=point,
-                entry_type="rest_area", page_state="rest_menu", target_probe=rest_menu,
-                click=lambda: self.click([point["x"], point["y"]]), check_cancelled=_check_cancelled,
+            await tracked_to_thread(
+                enter_resolved_city_shop, {**point, "shop_key": "rest"}, app=self.app, vision=self.vision,
+                interaction=InteractionService(self.app, observation=self._observation),
+                target_probe=rest_menu, check_cancelled=_check_cancelled,
             )
         except CityShopEntryError as exc:
             code = "sparkling_water_transition_timeout" if exc.code == "city_shop_entry_timeout" else exc.code
             self.fail(code, exc.message, {"entry": exc.detail})
+        except CaptureError as exc:
+            self._fail_capture(exc, {"entry": getattr(exc, "detail", {})})
         self.page = "rest_menu"
 
     async def enter_drink_menu(self) -> None:

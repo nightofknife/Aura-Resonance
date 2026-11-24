@@ -19,11 +19,10 @@ from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.scheduler.operation_scope import OperationTimeout
 from packages.aura_core.utils.exceptions import StopTaskException, TaskControlException
 from packages.aura_core.utils.task_errors import recognition_failure
-from ....aura_base.src.platform.contracts import TargetRuntimeError
 from ....aura_base.src.services.observation_service import CaptureError, ObservationService
 
 from ._fatigue_observation import FatigueConfirmation, fatigue_window_key, read_fatigue_pair
-from ._bounded_observation import ObservationBudget
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 
 from .character_pc_actions import (
     enter_character_page,
@@ -82,7 +81,6 @@ def _scan_inventory_stage(
         return read_inventory_equipment(app, ocr, vision, catalog=catalog)
     raise ValueError(f"unsupported inventory category: {category}")
 
-_CLICK_PROFILE = (150, 655)
 _CLICK_BACK = (82, 34)
 _CLICK_PROFILE_CLOSE = (900, 150)
 _PROFILE_MENU_TEMPLATE = PROFILE_MENU.path
@@ -267,91 +265,19 @@ def _wait_for_profile_panel(
     )
 
 
-def _open_profile_panel(app: Any, vision: Any) -> None:
-    """Confirm the destination and retry only from a freshly confirmed main page."""
-    budget = ObservationBudget(8.0, monotonic=time.monotonic, check_cancelled=check_cancelled)
-    clicks = 0
-    observations = 0
-    consecutive_hits = 0
-    next_click_at = budget.monotonic()
-    last_confidence = 0.0
-    last_page = "unknown"
-
-    def observe_profile() -> Dict[str, Any]:
-        nonlocal observations, last_confidence
-        match = _match_navigation_template(
-            app, vision, _PROFILE_MENU_TEMPLATE, _PROFILE_MENU_MARKER_REGION,
-            threshold=PROFILE_MENU.threshold,
-        )
-        observations += 1
-        last_confidence = float(match.get("confidence") or 0.0)
-        return match
-
-    while budget.active():
-        match = observe_profile()
-        if not budget.active():
-            break
-        if match.get("found"):
-            last_page = "profile_pending"
-            consecutive_hits += 1
-            if consecutive_hits >= 2:
-                logger.info(
-                    "[ProfilePanelOpen] result=confirmed clicks=%s/3 observations=%s confidence=%.4f",
-                    clicks, observations, last_confidence,
-                )
-                return
-        else:
-            consecutive_hits = 0
-            last_page = "unknown"
-            if clicks < 3 and budget.monotonic() >= next_click_at:
-                main = _wait_main_stable(app, vision, timeout_sec=budget.pause_seconds(0.7))
-                if not budget.active():
-                    break
-                if main.get("confirmed"):
-                    # The panel may have opened while confirming the source page.
-                    # Recheck it before another click can close it again.
-                    match = observe_profile()
-                    if not budget.active():
-                        break
-                    if match.get("found"):
-                        consecutive_hits = 1
-                        last_page = "profile_pending"
-                    else:
-                        last_page = "main"
-                        check_cancelled()
-                        if not budget.active():
-                            break
-                        try:
-                            app.click(x=_CLICK_PROFILE[0], y=_CLICK_PROFILE[1])
-                        except TargetRuntimeError as exc:
-                            exc.detail.setdefault("step", "打开个人资料")
-                            raise
-                        clicks += 1
-                        # Space retries from the actual click, never catch up
-                        # on scheduled retries after an unknown-page interval.
-                        next_click_at = budget.monotonic() + 2.0
-                        last_page = "unknown"
-                        logger.info(
-                            "[ProfilePanelOpen] result=clicked attempt=%s/3 point=%s confidence=%.4f",
-                            clicks, _CLICK_PROFILE, last_confidence,
-                        )
-        if budget.active():
-            time.sleep(budget.pause_seconds(0.5))
-
-    check_cancelled()
-    logger.warning(
-        "[ProfilePanelOpen] result=failed clicks=%s/3 observations=%s last_page=%s confidence=%.4f",
-        clicks, observations, last_page, last_confidence,
-    )
-    raise StopTaskException(
-        "Player data refresh failed: profile panel was not confirmed within 8.0s "
-        f"(clicks={clicks}/3, observations={observations}, last_page={last_page}, "
-        f"last_confidence={last_confidence:.3f}).",
-        success=False,
-        details=recognition_failure(
-            "打开个人资料", "个人资料页标志", "template", "timeout", timeout_sec=8,
-        ),
-    )
+def _open_profile_panel(app: Any, vision: Any, interaction: Any = None) -> None:
+    """Enter the profile from the main screen or reuse the visible profile."""
+    try:
+        open_station_page("个人资料", app=app, vision=vision, interaction=interaction,
+                          check_start=True, cancel_check=check_cancelled, entry_timeout=8.)
+    except StationMainNavigationError as exc:
+        raise StopTaskException(
+            f"Player data refresh failed: profile panel was not confirmed "
+            f"(clicks={exc.detail['click_attempts']}/3).",
+            success=False,
+            details={**recognition_failure("打开个人资料", "个人资料页标志", "template", "timeout",
+                                           timeout_sec=8), "navigation": exc.to_dict()},
+        ) from exc
 
 
 def _find_text_item(items: Iterable[Mapping[str, Any]], marker: str) -> Optional[Dict[str, Any]]:
@@ -1058,7 +984,7 @@ def resonance_pc_player_data_refresh(
     if panel_required:
         try:
             current_page = "unknown"
-            _open_profile_panel(app, vision)
+            _open_profile_panel(app, vision, interaction)
             current_page = "profile"
 
             if "profile" in selected:

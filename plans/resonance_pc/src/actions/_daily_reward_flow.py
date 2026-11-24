@@ -12,6 +12,7 @@ from packages.aura_core.scheduler.operation_scope import OperationScope, Operati
 from packages.aura_core.utils.task_errors import recognition_failure
 from ....aura_base.src.services.interaction_service import TransitionPolicy, TransitionProbe, TransitionState
 from ._daily_reward_vision import DailyRewardError, DailyRewardReader
+from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
 
 
 _PAGE_LABELS = {
@@ -19,7 +20,7 @@ _PAGE_LABELS = {
     "tasks": "通行证任务页", "manual": "通行证手册页",
 }
 _CONTROL_LABELS = {
-    "main_entry_with_red": "带红点的奖励入口", "claimable": "领取按钮",
+    "claimable": "领取按钮",
     "activity_gold": "活跃度奖励", "reward_exit": "奖励弹窗",
     "city_main": "返回列车主界面的按钮",
 }
@@ -73,7 +74,7 @@ class DailyRewardFlow:
             previous = a.hits[key]
             if current.state != previous.state:
                 return False
-            if key in {"main_screen", "main_entry_with_red", "daily_tab", "city_main", "reward_title", "reward_exit"} and current.state == "present" and any(abs(old - new) > 2
+            if key in {"main_screen", "daily_tab", "city_main", "reward_title", "reward_exit"} and current.state == "present" and any(abs(old - new) > 2
                     for old, new in zip(previous.client_center, current.client_center)):
                 return False
         return True
@@ -90,6 +91,17 @@ class DailyRewardFlow:
                              **recognition_failure("确认当前页面", targets, "template", "timeout",
                                                    timeout_sec=timeout))
         return result
+
+    def open_reward_page(self, target, stage):
+        self.stage = stage
+        self.confirmed_page({"main"})
+        try:
+            opened = open_station_page(target, app=self.app, interaction=self.interaction)
+        except StationMainNavigationError as exc:
+            self.clicks[stage] = exc.detail.get("click_attempts", 0)
+            raise self.error("daily_reward_entry_unconfirmed", "未能确认每日奖励入口已打开。",
+                             navigation=exc.to_dict()) from exc
+        self.clicks[stage] = opened["click_attempts"]
 
     def transition(self, stage, source, target, control, *, fixed_point=None, post_click_target=None):
         self.stage = stage
@@ -161,12 +173,7 @@ class DailyRewardFlow:
     def run(self):
         try:
             with self.scope.activate():
-                initial = self.confirmed_page({"main"})
-                if initial.absent("main_entry_with_red"):
-                    logger.info("[DailyRewards] skipped: confirmed main screen without reminder")
-                    return self.result("skipped_no_reminder", "no_daily_reminder")
-                self.transition("enter_daily", lambda p: p.page_state == "main" and p.present("main_entry_with_red"),
-                    lambda p: p.page_state == "daily", "main_entry_with_red")
+                self.open_reward_page("每日任务", "enter_daily")
                 for _ in range(24):
                     page = self.confirmed_page({"daily", "reward"})
                     if page.page_state == "reward":

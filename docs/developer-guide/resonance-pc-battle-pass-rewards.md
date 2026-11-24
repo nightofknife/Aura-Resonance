@@ -7,10 +7,8 @@
 
 ## 执行顺序
 
-1. 从 1280×720 站场主界面启动，用既有「启程」锚点确认主界面。
-   同帧匹配完整的带红点星形入口，明确未命中时返回 `skipped_no_reminder`。
-   识别技术错误或未知页面不能作为「没有红点」。
-2. 点击入口，确认通行证页面。直接匹配左侧当前可见卡片右上角的原生红点。
+1. 从 1280×720 站场主界面启动，由通用 action 点击星形通行证入口。有无入口红点都进入。
+2. 连续两帧识别到「标准手册」徽标后，匹配左侧当前可见卡片右上角的原生红点。
    一个可见红点对应一张待处理的卡片。
 3. 点击带红点的卡片，确认该行的白色选中边框后，再切换到「任务列表」。
    **按照用户确认的规则，只判断任务「一键领取」按钮是否出现**；出现就点击，
@@ -38,7 +36,8 @@
 ## 点击确认与限额
 
 `BattlePassRewardFlow` 复用每日流程的 `transition`、`confirmed_page` 和 `observe`，
-只替换读图器、错误上下文、超时及业务顺序。每日流程默认参数保持不变。
+并提供通行证读图器、错误上下文、超时及业务顺序。开页由通用 action 在首点后 8 秒内确认。
+以下规则适用于页内领取和返回。
 
 - 点击前连续两帧确认页面、当前通行证及目标；目标已出现时跳过点击。
 - 点击后等待至少 1.2 秒，再连续两帧确认目标状态。只有重新确认原页面和按钮仍存在才能补点。
@@ -50,13 +49,13 @@
 ## 结果与素材
 
 成功结果含 `success=true`、`component=battle_pass`、`returned_to_main=true`，
-`status` 为 `collected`、`nothing_to_claim` 或 `skipped_no_reminder`。
+`status` 为 `collected` 或 `nothing_to_claim`。
 `passes_processed` 是完整处理的通行证数，`passes` 含当时的卡片行坐标与两类领取阶段操作次数。
 `claim_clicks` 包含补点，`reward_overlays` 为实际确认的奖励弹层数，两者都不是物品数量。
 异常带 `code/message/detail`，含最后页面、当前通行证、已处理项及点击次数。
 
 运行素材位于 `templates/rewards/battle_pass/`，参数目录为
-`data/meta/battle_pass_templates_pc.json`。保留已确认的完整带红点入口。
+`data/meta/battle_pass_templates_pc.json`。站场入口与「标准手册」徽标位于 `templates/navigation/station_main/`。
 弹层图标为 46×45，二值遮罩只包含白色主体，排除文字、加号和黑色背景。
 先用带遮罩的平方差确认白色笔画，再在同一帧、同一位置、同一遮罩内确认笔画的灰度变化，
 避免将浅色面板当作图标；不引入其他弹层锚点。两次匹配阈值分别为 0.9 和 0.5。

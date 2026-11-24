@@ -7,8 +7,10 @@ import time
 from typing import Any, Callable, Mapping
 
 from packages.aura_core.observability.logging.core_logger import logger
+from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 
-from ._rubbish_recycling_vision import observe_recycling_page
+from ._rubbish_recycling_vision import RECYCLING_CENTER_TOLERANCE, observe_recycling_page
+from .city_shop_navigation_pc_actions import enter_resolved_city_shop
 
 
 _POLL_SEC = 0.3
@@ -20,7 +22,6 @@ _FLOW_TIMEOUT_SEC = 90.0
 _MAX_CLICKS = 3
 _OPEN_STATION_MAX_CLICKS = 2
 _STABLE_FRAMES = 2
-_STABLE_CENTER_TOLERANCE = 2
 _REWARD_DISMISS_POINT = (500, 500)
 
 _FAILURE_CODES = {
@@ -46,9 +47,10 @@ class RubbishRecyclingError(RuntimeError):
 
 class _RecyclingFlow:
     def __init__(self, *, city: Mapping, station: Mapping, app: Any, vision: Any,
-                 check_cancelled: Callable[[], None]):
+                 check_cancelled: Callable[[], None], interaction=None):
         self.city, self.station = city, station
         self.app, self.vision, self.check_cancelled = app, vision, check_cancelled
+        self.interaction = interaction
         self.started = time.monotonic()
         self.deadline = self.started + _FLOW_TIMEOUT_SEC
         self.stage_deadlines: dict[str, float] = {}
@@ -110,7 +112,7 @@ class _RecyclingFlow:
         old_center = (previous.get("match") or {}).get("center")
         new_center = (current.get("match") or {}).get("center")
         return (old_center is not None and new_center is not None
-                and all(abs(old - new) <= _STABLE_CENTER_TOLERANCE
+                and all(abs(old - new) <= RECYCLING_CENTER_TOLERANCE
                         for old, new in zip(old_center, new_center)))
 
     def click(self, stage: str, deadline: float, *, center: tuple[int, int] | list[int],
@@ -142,17 +144,12 @@ class _RecyclingFlow:
 
     def transition(self, stage: str, *, sources: set[str], targets: set[str],
                    control: str | None = None, point: tuple[int, int] | None = None,
-                   retry_sec: float = _CONFIRM_SEC, initial_source: str | None = None) -> dict:
+                   retry_sec: float = _CONFIRM_SEC) -> dict:
         # Re-entering a stage after a reward must not reset its click/time budget.
         deadline = self.stage_deadlines.setdefault(
             stage, min(self.deadline, time.monotonic() + _STAGE_TIMEOUT_SEC))
         clicks = self.clicks.setdefault(stage, [])
-        opening_station = stage == "open_station"
         entering_recycle = stage == "enter_recycle"
-        click_limit = _OPEN_STATION_MAX_CLICKS if opening_station else _MAX_CLICKS
-        if initial_source is not None and point is not None and not clicks:
-            self.click(stage, deadline, center=point, state=initial_source,
-                       match={"reason": "source_confirmed_by_caller"})
         previous, stable = None, 0
         stable_since = time.monotonic()
         while True:
@@ -188,12 +185,8 @@ class _RecyclingFlow:
                     return result
                 elapsed = now - self.last_clicks.get(stage, -math.inf)
                 if state in sources and elapsed >= retry_sec:
-                    if len(clicks) >= click_limit:
-                        if not opening_station:
-                            self.fail(stage)
-                        # A delayed station response may still arrive before the deadline.
-                        self.sleep(_POLL_SEC, stage, deadline)
-                        continue
+                    if len(clicks) >= _MAX_CLICKS:
+                        self.fail(stage)
                     match = (observation.get("evidence", {}).get(control, {})
                              if control else observation.get("match") or {})
                     if point is not None:
@@ -209,13 +202,61 @@ class _RecyclingFlow:
                         continue
             self.sleep(_POLL_SEC, stage, deadline)
 
+    def _record_station_entry(self, entry):
+        menu = (entry.get("last_observation") or {}).get("menu")
+        if menu:
+            self.last = {"state": menu["page"], "reason": menu["reason"], "match": menu["match"],
+                         "evidence": menu["evidence"], "city_key": self.city["city_key"],
+                         "region": [0, 0, 1280, 720]}
+        clicks = []
+        for receipt in entry.get("clicks", []):
+            x, y = receipt["point"]
+            clicks.append({
+                "clicked": receipt["sent"], "x": x, "y": y, "source_state": "city_panel",
+                "match": receipt["source_match"] or {"reason": "source_confirmed_by_caller"},
+                "reason": "initial" if not clicks else "source_page_still_visible",
+                "elapsed_ms": round((receipt["timestamp"] - self.started) * 1000),
+            })
+        self.clicks["open_station"] = clicks
+        return clicks
+
+    def _open_station(self, *, city_panel_confirmed=False):
+        stage = "open_station"
+        self.check_deadline(stage, self.deadline)
+        scope = OperationScope(max(0, self.deadline - time.monotonic()), parent=current_operation_scope(),
+                               target=getattr(self.app, "target_runtime", None), cancel_check=self.check_cancelled)
+        point = {**self.station, "city_key": self.city["city_key"], "city_name": self.city["city_name"],
+                 "shop_key": "waste_processing_center"}
+        try:
+            with scope.activate():
+                entry = enter_resolved_city_shop(
+                    point, app=self.app, vision=self.vision, interaction=self.interaction,
+                    city_panel_confirmed=city_panel_confirmed, allow_recycling_pages=True,
+                    max_clicks=_OPEN_STATION_MAX_CLICKS, check_cancelled=self.check_cancelled,
+                )
+        except Exception as exc:
+            self.check_cancelled()
+            detail = getattr(exc, "detail", {})
+            self._record_station_entry(detail)
+            code = getattr(exc, "code", "rubbish_observation_failed")
+            if time.monotonic() >= self.deadline:
+                code = "rubbish_flow_timeout"
+            elif code == "city_shop_entry_timeout" or isinstance(exc, OperationTimeout):
+                code = _FAILURE_CODES[stage]
+            elif code == "city_shop_point_outside_client":
+                code = "rubbish_click_point_invalid"
+            elif code in {"input_failed", "input_rejected"}:
+                code = "rubbish_click_failed"
+            self.fail(stage, code=code, cause={"message": str(exc), "detail": detail})
+        clicks = self._record_station_entry(entry)
+        self.check_deadline(stage, self.deadline)
+        state = self.last["state"]
+        self.transitions.append({"stage": stage, "state": state, "click_attempts": len(clicks)})
+        return {"stage": stage, "state": state, "observation": self.last,
+                "clicks": list(clicks), "confirmations": _STABLE_FRAMES}
+
     def run(self, *, city_panel_confirmed: bool = False) -> dict:
-        station_result = self.transition(
-            "open_station", sources={"city_panel"},
-            targets={"station_menu", "has_rubbish", "empty"},
-            point=(int(self.station["x"]), int(self.station["y"])),
-            initial_source="city_panel" if city_panel_confirmed else None,
-        )
+        station_result = self._open_station(city_panel_confirmed=city_panel_confirmed)
         entered = self.transition(
             "enter_recycle",
             sources={"station_menu"} if station_result["state"] == "station_menu" else set(),
@@ -274,6 +315,9 @@ class _RecyclingFlow:
 
 
 def run_rubbish_recycling(*, city: Mapping, station: Mapping, app: Any, vision: Any,
-                          check_cancelled: Callable[[], None], city_panel_confirmed: bool = False) -> dict:
+                          check_cancelled: Callable[[], None], city_panel_confirmed: bool = False,
+                          interaction=None) -> dict:
     return _RecyclingFlow(city=city, station=station, app=app, vision=vision,
-                          check_cancelled=check_cancelled).run(city_panel_confirmed=city_panel_confirmed)
+                          check_cancelled=check_cancelled, interaction=interaction).run(
+        city_panel_confirmed=city_panel_confirmed,
+    )

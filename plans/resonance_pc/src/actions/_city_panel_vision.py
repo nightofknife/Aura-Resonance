@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from packages.aura_core.observability.logging.core_logger import logger
+from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 from ....aura_base.src.services.prepared_template import PreparedTemplate
 from ._navigation_templates import CITY_PANEL_REPUTATION
 
@@ -18,9 +19,6 @@ VISIT_REGION = (1000, 450, 250, 70)
 CITY_THRESHOLD = 0.55
 VISIT_THRESHOLD = 0.9
 POLL_INTERVAL = 0.15
-TRANSITION_SEC = 0.3
-RETRY_INTERVAL = 2.0
-MAX_CLICKS = 4
 _PLAN_ROOT = Path(__file__).resolve().parents[2]
 _CATALOG = "data/meta/city_identity_templates.json"
 
@@ -148,17 +146,6 @@ def probe_visit_entry(*, app, vision, check_cancelled):
     return {"found": found, "confidence": score, "center": center, "region": list(VISIT_REGION)}
 
 
-def _probe_city_panel(*, app, vision, check_cancelled):
-    profile = CITY_PANEL_REPUTATION
-    image = _capture(app, profile.roi, check_cancelled)
-    hit = vision.find_template(source_image=image, template_image=str(_PLAN_ROOT / profile.path),
-                               **profile.match_kwargs())
-    check_cancelled()
-    score = _score(hit)
-    return {"found": score is not None and score >= profile.threshold and bool(hit.found),
-            "confidence": score, "method": "city_panel_reputation", "region": list(profile.roi)}
-
-
 def _sleep(seconds, check_cancelled):
     check_cancelled()
     time.sleep(max(seconds, 0.0))
@@ -195,33 +182,35 @@ def wait_city(*, app, vision, check_cancelled, timeout_sec=3.0):
 
 
 def open_city_panel(*, app, vision, check_cancelled, timeout_sec=12.0, identify_city=True):
+    from .station_main_navigation_pc_actions import StationMainNavigationError, open_station_page
+
     started = time.monotonic()
     deadline = _deadline(started, timeout_sec)
-    previous = None
-    clicks = []
-    last_click = -math.inf
-    probe_panel = probe_city if identify_city else _probe_city_panel
-    key_field = "city_key" if identify_city else "method"
-    while True:
-        match = probe_panel(app=app, vision=vision, check_cancelled=check_cancelled)
-        current = match[key_field] if match["found"] else None
-        if current is not None and current == previous:
-            return {"success": True, "page_state": "city_panel", "city": _confirmed(match, started),
-                    "skipped": not clicks, "click_attempts": len(clicks), "clicks": clicks,
-                    "click": clicks[0] if clicks else None}
-        previous = current
-        if time.monotonic() >= deadline:
-            raise CityPanelVisionError("open_city_panel_failed", "City panel was not confirmed",
-                                       {"match": match, "click_attempts": len(clicks), "clicks": clicks})
-        if not match["found"] and len(clicks) < MAX_CLICKS and time.monotonic()-last_click >= RETRY_INTERVAL:
-            entry = probe_visit_entry(app=app, vision=vision, check_cancelled=check_cancelled)
-            if entry["found"]:
-                check_cancelled()
-                app.click(x=entry["center"][0], y=entry["center"][1])
-                check_cancelled()
-                last_click = time.monotonic()
-                clicks.append({"clicked": True, "center": entry["center"], "match": entry})
-                logger.info("[CityIdentity] phase=open_click attempt=%s match=%s", len(clicks), entry)
-                _sleep(min(TRANSITION_SEC, max(deadline-time.monotonic(), 0.0)), check_cancelled)
-                continue
-        _sleep(min(POLL_INTERVAL, max(deadline-time.monotonic(), 0.0)), check_cancelled)
+    scope = OperationScope(deadline - started, parent=current_operation_scope(),
+                           target=getattr(app, "target_runtime", None), cancel_check=check_cancelled)
+    opened = {}
+    try:
+        with scope.activate():
+            opened = open_station_page("城市面板", app=app, vision=vision, check_start=True)
+            if identify_city:
+                city = wait_city(app=app, vision=vision, check_cancelled=scope.checkpoint,
+                                 timeout_sec=scope.remaining)
+            else:
+                matches = opened["last_observation"]["match_details"]
+                match = next(iter(matches.values()))
+                city = _confirmed({**match, "method": "city_panel_reputation",
+                                   "region": list(CITY_PANEL_REPUTATION.roi)}, started)
+    except StationMainNavigationError as exc:
+        raise CityPanelVisionError("open_city_panel_failed", "City panel was not confirmed", exc.detail) from exc
+    except OperationTimeout as exc:
+        scope.check_cancelled()
+        raise CityPanelVisionError("open_city_panel_failed", "City panel or city identity was not confirmed",
+                                   opened) from exc
+
+    clicks = [
+        {"clicked": True, "center": center,
+         "match": {**evidence.get("templates/navigation/city/visit_entry.png", {}), "region": list(VISIT_REGION)}}
+        for center, evidence in zip(opened["clicks"], opened["entry_observations"])
+    ]
+    return {"success": True, "page_state": "city_panel", "city": city, "skipped": not clicks,
+            "click_attempts": opened["click_attempts"], "clicks": clicks, "click": clicks[0] if clicks else None}

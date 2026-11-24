@@ -42,6 +42,7 @@ def test_reward_exit_unknown_does_not_confirm_the_underlying_daily_page(reason):
 @pytest.mark.parametrize(
     ("activity_clicks", "overlays"),
     [
+        ([], []),
         ([(441, 177)], [False]),
         ([(441, 177), (562, 177)], [True, False]),
         ([(441, 177), (441, 177)], [False, False]),
@@ -59,7 +60,7 @@ def test_daily_activity_rescans_for_remaining_rewards(monkeypatch, activity_clic
     def observe(_scope):
         frame = Frame.from_image(pixels)
         controls = {
-            "main": {"main_entry_with_red": entry},
+            "main": {},
             "reward": {"reward_exit": dismiss},
             "daily": {
                 "claimable": None,
@@ -93,6 +94,12 @@ def test_daily_activity_rescans_for_remaining_rewards(monkeypatch, activity_clic
 
     monkeypatch.setattr(_daily_reward_flow.DailyRewardFlow, "reader_type",
                         staticmethod(lambda _: SimpleNamespace(observe=observe)))
+    def open_page(target, *, app, interaction):
+        assert target == "每日任务"
+        app.click(x=entry[0], y=entry[1])
+        return {"click_attempts": 1}
+
+    monkeypatch.setattr(_daily_reward_flow, "open_station_page", open_page)
     with install_clock(monkeypatch, _daily_reward_flow):
         flow = _daily_reward_flow.DailyRewardFlow(SimpleNamespace(click=click), None, InteractionService())
         result = flow.run()
@@ -103,7 +110,7 @@ def test_daily_activity_rescans_for_remaining_rewards(monkeypatch, activity_clic
         if has_overlay:
             expected.append(dismiss)
     assert clicks == [*expected, exit_to_main]
-    assert result["status"] == "collected"
+    assert result["status"] == ("collected" if activity_clicks else "nothing_to_claim")
     assert result["claim_clicks"] == len(activity_clicks)
     assert result["reward_overlays"] == sum(overlays)
     assert result["returned_to_main"] is True

@@ -14,7 +14,7 @@ import pytest
 from packages.aura_core.scheduler.operation_scope import OperationScope
 from packages.aura_core.utils.exceptions import StopTaskException
 from plans.aura_base.src.services.interaction_service import InteractionService
-from plans.aura_base.src.services.observation_service import Frame
+from plans.aura_base.src.services.observation_service import Frame, Observation
 from plans.resonance_pc.src.actions import _prison_product_snapshot as snapshot
 from plans.resonance_pc.src.actions._prison_warehouse_runtime import WarehouseTransferError
 
@@ -114,7 +114,13 @@ def runtime_services(*, initial="profile", destination="profile", cancel_at=None
         image = np.full((720, 1280, 3), labels[phase[0]], dtype=np.uint8)
         if phase[0] == "daily_report":
             image[10:54, 262:554] = report_header
-        return Frame.from_image(image, frame_id=f"visible-{sequence[0]}", timestamp=now[0])
+        return Frame.from_image(image, frame_id=f"visible-{sequence[0]}")
+
+    def match_station(frame, template, **kwargs):
+        name = Path(template).name
+        visible = {"main": {"visit_entry.png", "depart.png", "train_maintenance.png"},
+                   "profile": {"profile_entry.png"}}
+        return Observation("present" if name in visible.get(phase[0], ()) else "absent", frame.id)
 
     def click(*, x, y):
         point = [x, y]
@@ -137,7 +143,7 @@ def runtime_services(*, initial="profile", destination="profile", cancel_at=None
 
     app = SimpleNamespace(get_window_size=lambda: (1280, 720), click=click,
                           drag=lambda **kwargs: pytest.fail("Visible snapshot tried to drag"))
-    interaction = InteractionService(app=app, observation=SimpleNamespace(capture=capture))
+    interaction = InteractionService(app=app, observation=SimpleNamespace(capture=capture, match_template=match_station))
     runtime = snapshot.VisiblePrisonProductRuntime(app, object(), object(), interaction, Scope(120), lambda: False)
     report_header = _image(PLAN / snapshot._DAILY_REPORT_HEADER) if entry == "daily_report" else None
 
@@ -157,7 +163,7 @@ def runtime_services(*, initial="profile", destination="profile", cancel_at=None
             "capacity": {"current": 78, "limit": 1003}, "list_state": "populated", "unresolved": [],
             "controls": {name: {"valid": True, "found": True, "point": point} for name, point in {
                 "profile_reforming_entry": [611, 615], "overview_warehouse_shortcut": [75, 630],
-                "tp_connection_unselected": [540, 545], "back": [82, 34], "profile_avatar": [150, 655],
+                "tp_connection_unselected": [540, 545], "back": [82, 34],
             }.items()},
         }
 
