@@ -113,6 +113,18 @@ def resonance_pc_execute_rubbish_recycling_from_city_panel(
     vision: Any = None,
     resonance_pc_city_shop_data: ResonancePcCityShopDataService | None = None,
 ) -> Dict[str, Any]:
+    return _execute_rubbish_recycling_from_city_panel(
+        city_name=city_name, location_file_path=location_file_path,
+        app=app, vision=vision, resonance_pc_city_shop_data=resonance_pc_city_shop_data,
+    )
+
+
+def _execute_rubbish_recycling_from_city_panel(
+    *, city_name: str, app: Any, vision: Any,
+    resonance_pc_city_shop_data: ResonancePcCityShopDataService | None,
+    location_file_path: str = _LOCATION_PATH,
+    city_panel_confirmed: bool = False,
+) -> Dict[str, Any]:
     _check_cancelled()
     if app is None or vision is None or resonance_pc_city_shop_data is None:
         raise RuntimeError("app/vision/resonance_pc_city_shop_data services are required")
@@ -134,6 +146,7 @@ def resonance_pc_execute_rubbish_recycling_from_city_panel(
     )
     result = run_rubbish_recycling(
         city=city, station=point, app=app, vision=vision, check_cancelled=_check_cancelled,
+        city_panel_confirmed=city_panel_confirmed,
     )
     logger.info(
         "Rubbish recycling completed city=%s status=%s initial_state=%s final_state=%s elapsed_ms=%s",

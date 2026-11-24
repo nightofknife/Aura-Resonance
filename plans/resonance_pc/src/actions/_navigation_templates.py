@@ -33,6 +33,9 @@ GLOBAL_BACK = NavigationTemplateProfile(
 GLOBAL_CITY_MAIN = NavigationTemplateProfile(
     "templates/navigation/global/city_main.png", (140, 0, 130, 80), .86,
 )
+CITY_PANEL_REPUTATION = NavigationTemplateProfile(
+    "templates/navigation/city/panel_reputation.png", (21, 633, 85, 75), .86,
+)
 
 
 def navigation_profile_layout(reference: str) -> dict:

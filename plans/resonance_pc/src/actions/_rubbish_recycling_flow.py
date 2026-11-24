@@ -14,9 +14,11 @@ from ._rubbish_recycling_vision import observe_recycling_page
 _POLL_SEC = 0.3
 _POST_CLICK_SEC = 0.5
 _CONFIRM_SEC = 3.0
+_INITIAL_EMPTY_CONFIRM_SEC = 4.0
 _STAGE_TIMEOUT_SEC = 12.0
 _FLOW_TIMEOUT_SEC = 90.0
 _MAX_CLICKS = 3
+_OPEN_STATION_MAX_CLICKS = 2
 _STABLE_FRAMES = 2
 _STABLE_CENTER_TOLERANCE = 2
 _REWARD_DISMISS_POINT = (500, 500)
@@ -86,7 +88,7 @@ class _RecyclingFlow:
         try:
             observation = observe_recycling_page(
                 app=self.app, vision=self.vision, city_key=str(self.city["city_key"]),
-                station_point=self.station, check_cancelled=self.check_cancelled,
+                check_cancelled=self.check_cancelled,
             )
         except asyncio.CancelledError:
             raise
@@ -111,21 +113,70 @@ class _RecyclingFlow:
                 and all(abs(old - new) <= _STABLE_CENTER_TOLERANCE
                         for old, new in zip(old_center, new_center)))
 
+    def click(self, stage: str, deadline: float, *, center: tuple[int, int] | list[int],
+              state: str, match: dict) -> None:
+        if (len(center) != 2 or any(isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value) for value in center)
+                or not (0 <= center[0] < 1280 and 0 <= center[1] < 720)):
+            self.fail(stage, code="rubbish_click_point_invalid")
+        self.check_deadline(stage, deadline)
+        try:
+            self.app.click(x=int(center[0]), y=int(center[1]))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.check_cancelled()
+            self.fail(stage, code="rubbish_click_failed", cause=str(exc))
+        clicked_at = time.monotonic()
+        clicks = self.clicks[stage]
+        clicks.append({"clicked": True, "x": int(center[0]), "y": int(center[1]),
+                       "source_state": state, "match": match,
+                       "reason": "initial" if not clicks else "source_page_still_visible",
+                       "elapsed_ms": round((clicked_at - self.started) * 1000)})
+        self.last_clicks[stage] = clicked_at
+        self.check_deadline(stage, deadline)
+        logger.info("[RubbishFlow] phase=click stage=%s attempt=%s state=%s detail=%s",
+                    stage, len(clicks), state, clicks[-1])
+        self.sleep(_POST_CLICK_SEC, stage, deadline)
+
     def transition(self, stage: str, *, sources: set[str], targets: set[str],
                    control: str | None = None, point: tuple[int, int] | None = None,
-                   retry_sec: float = _CONFIRM_SEC) -> dict:
+                   retry_sec: float = _CONFIRM_SEC, initial_source: str | None = None) -> dict:
         # Re-entering a stage after a reward must not reset its click/time budget.
         deadline = self.stage_deadlines.setdefault(
             stage, min(self.deadline, time.monotonic() + _STAGE_TIMEOUT_SEC))
         clicks = self.clicks.setdefault(stage, [])
+        opening_station = stage == "open_station"
+        entering_recycle = stage == "enter_recycle"
+        click_limit = _OPEN_STATION_MAX_CLICKS if opening_station else _MAX_CLICKS
+        if initial_source is not None and point is not None and not clicks:
+            self.click(stage, deadline, center=point, state=initial_source,
+                       match={"reason": "source_confirmed_by_caller"})
         previous, stable = None, 0
+        stable_since = time.monotonic()
         while True:
             observation = self.observe(stage, deadline)
             state = observation["state"]
-            stable = stable + 1 if self.same_page(previous, observation) else int(state != "unknown")
+            if entering_recycle and clicks and state not in targets:
+                # Once requested, wait for a recycling control before allowing more input.
+                previous, stable = None, 0
+                self.sleep(_POLL_SEC, stage, deadline)
+                continue
+            now = time.monotonic()
+            if self.same_page(previous, observation):
+                stable += 1
+            else:
+                stable = int(state != "unknown")
+                stable_since = now
             previous = observation
             if stable >= _STABLE_FRAMES:
                 if state in targets:
+                    # On entry, the game can show the empty control before the rubbish count loads.
+                    if (entering_recycle and state == "empty"
+                            and now - stable_since < _INITIAL_EMPTY_CONFIRM_SEC):
+                        self.sleep(_POLL_SEC, stage, deadline)
+                        continue
                     if state == "reward":
                         self.reward_seen = True
                     result = {"stage": stage, "state": state, "observation": observation,
@@ -135,10 +186,14 @@ class _RecyclingFlow:
                     logger.info("[RubbishFlow] phase=confirmed stage=%s state=%s clicks=%s evidence=%s",
                                 stage, state, len(clicks), observation.get("evidence"))
                     return result
-                elapsed = time.monotonic() - self.last_clicks.get(stage, -math.inf)
+                elapsed = now - self.last_clicks.get(stage, -math.inf)
                 if state in sources and elapsed >= retry_sec:
-                    if len(clicks) >= _MAX_CLICKS:
-                        self.fail(stage)
+                    if len(clicks) >= click_limit:
+                        if not opening_station:
+                            self.fail(stage)
+                        # A delayed station response may still arrive before the deadline.
+                        self.sleep(_POLL_SEC, stage, deadline)
+                        continue
                     match = (observation.get("evidence", {}).get(control, {})
                              if control else observation.get("match") or {})
                     if point is not None:
@@ -148,42 +203,23 @@ class _RecyclingFlow:
                     else:
                         center = None
                     if center is not None:
-                        if (len(center) != 2 or any(isinstance(value, bool)
-                                or not isinstance(value, (int, float))
-                                or not math.isfinite(value) for value in center)
-                                or not (0 <= center[0] < 1280 and 0 <= center[1] < 720)):
-                            self.fail(stage, code="rubbish_click_point_invalid")
-                        self.check_deadline(stage, deadline)
-                        try:
-                            self.app.click(x=int(center[0]), y=int(center[1]))
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            self.check_cancelled()
-                            self.fail(stage, code="rubbish_click_failed", cause=str(exc))
-                        clicked_at = time.monotonic()
-                        clicks.append({"clicked": True, "x": int(center[0]), "y": int(center[1]),
-                                       "source_state": state, "match": match,
-                                       "reason": "initial" if not clicks else "source_page_still_visible",
-                                       "elapsed_ms": round((clicked_at - self.started) * 1000)})
-                        self.last_clicks[stage] = clicked_at
-                        self.check_deadline(stage, deadline)
-                        logger.info("[RubbishFlow] phase=click stage=%s attempt=%s state=%s detail=%s",
-                                    stage, len(clicks), state, clicks[-1])
+                        self.click(stage, deadline, center=center, state=state, match=match)
                         # No old coordinates, observations, or stable-frame counts survive input.
                         previous, stable = None, 0
-                        self.sleep(_POST_CLICK_SEC, stage, deadline)
                         continue
             self.sleep(_POLL_SEC, stage, deadline)
 
-    def run(self) -> dict:
+    def run(self, *, city_panel_confirmed: bool = False) -> dict:
         station_result = self.transition(
             "open_station", sources={"city_panel"},
             targets={"station_menu", "has_rubbish", "empty"},
             point=(int(self.station["x"]), int(self.station["y"])),
+            initial_source="city_panel" if city_panel_confirmed else None,
         )
         entered = self.transition(
-            "enter_recycle", sources={"station_menu"}, targets={"has_rubbish", "empty"},
+            "enter_recycle",
+            sources={"station_menu"} if station_result["state"] == "station_menu" else set(),
+            targets={"has_rubbish", "empty"},
             control="entry",
         )
         initial_state = entered["state"]
@@ -238,6 +274,6 @@ class _RecyclingFlow:
 
 
 def run_rubbish_recycling(*, city: Mapping, station: Mapping, app: Any, vision: Any,
-                          check_cancelled: Callable[[], None]) -> dict:
+                          check_cancelled: Callable[[], None], city_panel_confirmed: bool = False) -> dict:
     return _RecyclingFlow(city=city, station=station, app=app, vision=vision,
-                          check_cancelled=check_cancelled).run()
+                          check_cancelled=check_cancelled).run(city_panel_confirmed=city_panel_confirmed)

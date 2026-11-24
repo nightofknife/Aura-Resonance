@@ -10,6 +10,7 @@ import numpy as np
 
 from packages.aura_core.observability.logging.core_logger import logger
 from ....aura_base.src.services.prepared_template import PreparedTemplate
+from ._navigation_templates import CITY_PANEL_REPUTATION
 
 
 CITY_REGION = (25, 490, 175, 170)
@@ -147,6 +148,17 @@ def probe_visit_entry(*, app, vision, check_cancelled):
     return {"found": found, "confidence": score, "center": center, "region": list(VISIT_REGION)}
 
 
+def _probe_city_panel(*, app, vision, check_cancelled):
+    profile = CITY_PANEL_REPUTATION
+    image = _capture(app, profile.roi, check_cancelled)
+    hit = vision.find_template(source_image=image, template_image=str(_PLAN_ROOT / profile.path),
+                               **profile.match_kwargs())
+    check_cancelled()
+    score = _score(hit)
+    return {"found": score is not None and score >= profile.threshold and bool(hit.found),
+            "confidence": score, "method": "city_panel_reputation", "region": list(profile.roi)}
+
+
 def _sleep(seconds, check_cancelled):
     check_cancelled()
     time.sleep(max(seconds, 0.0))
@@ -163,8 +175,8 @@ def _deadline(started, timeout_sec):
 def _confirmed(match, started):
     result = {**match, "success": True, "page_state": "city_panel", "confirmations": 2,
               "elapsed_ms": round((time.monotonic()-started)*1000, 1)}
-    logger.info("[CityIdentity] phase=confirmed city=%s confidence=%s elapsed_ms=%s",
-                result["city_name"], result["confidence"], result["elapsed_ms"])
+    logger.info("[CityIdentity] phase=confirmed city=%s method=%s confidence=%s elapsed_ms=%s",
+                result.get("city_name"), result.get("method"), result["confidence"], result["elapsed_ms"])
     return result
 
 
@@ -182,19 +194,22 @@ def wait_city(*, app, vision, check_cancelled, timeout_sec=3.0):
         _sleep(min(POLL_INTERVAL, max(deadline-time.monotonic(), 0.0)), check_cancelled)
 
 
-def open_city_panel(*, app, vision, check_cancelled, timeout_sec=12.0):
+def open_city_panel(*, app, vision, check_cancelled, timeout_sec=12.0, identify_city=True):
     started = time.monotonic()
     deadline = _deadline(started, timeout_sec)
     previous = None
     clicks = []
     last_click = -math.inf
+    probe_panel = probe_city if identify_city else _probe_city_panel
+    key_field = "city_key" if identify_city else "method"
     while True:
-        match = probe_city(app=app, vision=vision, check_cancelled=check_cancelled)
-        if match["found"] and match["city_key"] == previous:
+        match = probe_panel(app=app, vision=vision, check_cancelled=check_cancelled)
+        current = match[key_field] if match["found"] else None
+        if current is not None and current == previous:
             return {"success": True, "page_state": "city_panel", "city": _confirmed(match, started),
                     "skipped": not clicks, "click_attempts": len(clicks), "clicks": clicks,
                     "click": clicks[0] if clicks else None}
-        previous = match["city_key"] if match["found"] else None
+        previous = current
         if time.monotonic() >= deadline:
             raise CityPanelVisionError("open_city_panel_failed", "City panel was not confirmed",
                                        {"match": match, "click_attempts": len(clicks), "clicks": clicks})
