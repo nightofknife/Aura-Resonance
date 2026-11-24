@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from ..config_repository import ResonanceConfigRepository
 from ..battle_plan import battle_editor_day_summary
@@ -509,6 +510,7 @@ class WorkflowPage(QWidget):
         self._committedLog.connect(self._append_committed_log, Qt.ConnectionType.QueuedConnection)
         self._settings = settings
         self._busy = False
+        self._locked_editors: list[QWidget] = []
         self._freight_validation_error = ""
         self._loading_state = False
         self._task_status: dict[str, QLabel] = {}
@@ -1977,6 +1979,8 @@ class WorkflowPage(QWidget):
         for row in self._task_rows.values():
             row.enabled_check.setEnabled(enabled)
             row.drag_handle.setEnabled(enabled)
+        # Result rendering can replace editors while the workflow is still running.
+        locked_editors = [widget for widget in self._locked_editors if isValid(widget)]
         if not enabled:
             newly_locked = [
                 widget for widget in self.center_panel.findChildren(QWidget)
@@ -1984,11 +1988,11 @@ class WorkflowPage(QWidget):
                 and widget.isEnabled() and not widget.property("uiDisclosure")
                 and widget is not self.runtime_plan_button
             ]
-            self._locked_editors = list(dict.fromkeys(getattr(self, "_locked_editors", []) + newly_locked))
+            self._locked_editors = list(dict.fromkeys(locked_editors + newly_locked))
             for widget in self._locked_editors:
                 widget.setEnabled(False)
         else:
-            for widget in getattr(self, "_locked_editors", []):
+            for widget in locked_editors:
                 widget.setEnabled(True)
             self._locked_editors = []
         self._sync_move_buttons()
