@@ -19,7 +19,7 @@ from packages.aura_core.api import service_info
 from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 
 from .observation_service import Frame, Observation, ObservationService
-from ._target_identity import read_target_identity
+from ._target_identity import read_target_identity, target_identity_changed
 
 
 @dataclass(frozen=True)
@@ -212,12 +212,13 @@ def send_input(callback, *, scope: OperationScope, point=None, frame: Frame | No
             _checkpoint(scope, check_cancelled)
             if frame is not None and identity is not None and frame.target_identity is None:
                 raise InteractionError("input_target_unverified", "input", observation=observation)
-            if frame is not None and frame.target_identity is not None and identity != frame.target_identity:
+            if frame is not None and frame.target_identity is not None and target_identity_changed(
+                    frame.target_identity, identity, phase="input"):
                 raise InteractionError("input_target_changed", "input", observation=observation)
             if validate is not None:
                 validate()
             _checkpoint(scope, check_cancelled)
-            if _identity(app, scope) != identity:
+            if target_identity_changed(identity, _identity(app, scope), phase="input"):
                 raise InteractionError("input_target_changed", "input", observation=observation)
             _checkpoint(scope, check_cancelled)
             if session is not None:
@@ -236,7 +237,7 @@ def send_input(callback, *, scope: OperationScope, point=None, frame: Frame | No
             acknowledged = None if acknowledged is None else bool(acknowledged)
             receipt = remember(replace(receipt, sent=acknowledged is not False, acknowledged=acknowledged, call_returned=True))
             _checkpoint(scope, check_cancelled)
-            if _identity(app, scope) != identity:
+            if target_identity_changed(identity, _identity(app, scope), phase="input"):
                 raise InteractionError("input_target_changed", "input", observation=observation, receipts=(receipt,))
             _checkpoint(scope, check_cancelled)
             if acknowledged is False:
@@ -384,10 +385,11 @@ def _collect_source(allow_source, state):
 def _target_epoch(scope, state, current=None):
     """The runtime object is a lease target; its bound window epoch also matters."""
     identity = _identity(None, scope)
-    if state.target_bound and identity != state.target_identity:
+    if state.target_bound and target_identity_changed(state.target_identity, identity, phase="observe"):
         raise InteractionError("input_target_changed", "observe", observation=state.last,
                                receipts=state.receipts)
-    if current is not None and current.target_bound and identity != current.target_identity:
+    if current is not None and current.target_bound and target_identity_changed(
+            current.target_identity, identity, phase="input"):
         raise InteractionError("input_target_changed", "input", observation=current,
                                receipts=state.receipts)
     state.target_identity, state.target_bound = identity, True
@@ -688,7 +690,8 @@ class InteractionService:
             identity = _identity(self.app, scope)
             if identity is not None and frame.target_identity is None:
                 raise InteractionError("input_target_unverified", "input", observation=source)
-            if frame.target_identity is not None and identity != frame.target_identity:
+            if frame.target_identity is not None and target_identity_changed(
+                    frame.target_identity, identity, phase="input"):
                 raise InteractionError("input_target_changed", "input", observation=source)
             _checkpoint(scope)
             self.app.move_to(point[0], point[1], duration=duration)
