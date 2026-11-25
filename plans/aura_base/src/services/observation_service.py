@@ -22,7 +22,7 @@ from packages.aura_core.scheduler.operation_scope import OperationScope, Operati
 
 from .ocr_service import OcrResult
 from .prepared_template import PreparedTemplate
-from ._target_identity import freeze_target_identity, read_target_identity
+from ._target_identity import freeze_target_identity, read_target_identity, target_identity_changed
 from .vision_service import MatchResult
 
 Rect = tuple[int, int, int, int]
@@ -240,7 +240,7 @@ class ObservationService:
                 scope.checkpoint()
                 after = self._identity()
                 scope.checkpoint()
-                if before != after:
+                if target_identity_changed(before, after, phase="capture"):
                     raise CaptureError("Capture target identity changed", roi=roi)
                 if not result.success or result.image is None:
                     raise CaptureError(getattr(result, "error_message", "") or "capture_failed", roi=roi)

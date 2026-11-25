@@ -164,6 +164,12 @@ class ResonancePcTargetRuntimeService(TargetRuntimeService):
         time.sleep(delay)
         return True
 
+    def interaction_target_identity(self):
+        if not self._use_bridge:
+            return super().target_summary()
+        with target_operation_guard(self):
+            return self.bridge.interaction_target_identity()
+
     def target_summary(self):
         if not self._use_bridge:
             return super().target_summary()

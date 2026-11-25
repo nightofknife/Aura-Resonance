@@ -60,6 +60,7 @@ class ResonancePcInputBridgeService:
         self._assets = ASSETS
         self._frame_stream = None
         self._session_root_cid = None
+        self._session_generation = 0
         self._lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._mode = None
@@ -192,8 +193,13 @@ class ResonancePcInputBridgeService:
         # The desktop adapter must never bind or recover a window in bridge mode.
         if self._identity is not None:
             pid, hwnd = self._identity[:2]
-            if win32gui.IsWindow(hwnd) and win32process.GetWindowThreadProcessId(hwnd)[1] == pid:
+            if not win32gui.IsWindow(hwnd):
+                changed_field = "hwnd"
+            elif win32process.GetWindowThreadProcessId(hwnd)[1] != pid:
+                changed_field = "pid"
+            else:
                 return pid, hwnd
+            log_event("input.target_changed", phase="bridge_bind", changed_fields=[changed_field])
             raise TargetRuntimeError("viewport_changed", "Bridge target window or process changed")
         candidate = resolve_window_candidate(resolve_runtime_config(self.config).target)
         if not candidate.pid:
@@ -277,6 +283,7 @@ class ResonancePcInputBridgeService:
                     raise
             self._client = client
             self._accept(reply)
+            self._session_generation += 1
             self._needs_hello = False
         elif self._client.uncertain:
             raise TargetRuntimeError("input_result_unknown", "Previous result is uncertain; cancel input before continuing.")
@@ -340,6 +347,11 @@ class ResonancePcInputBridgeService:
             except TargetRuntimeError as exc:
                 if exc.code == "viewport_changed":
                     self._needs_hello = True
+                    log_event("input.target_changed", phase="bridge_input", changed_fields=["viewport"],
+                              reason=str(exc))
+                elif exc.code == "session_invalid":
+                    log_event("input.target_changed", phase="bridge_input", changed_fields=["bridge_session_generation"],
+                              reason=str(exc))
                 raise
             finally:
                 with self._state_lock:
@@ -354,6 +366,22 @@ class ResonancePcInputBridgeService:
         with self._lock:
             self._ready()
             return (0, 0, self._viewport["width"], self._viewport["height"])
+
+    def interaction_target_identity(self):
+        """Bind the session before the first observation and use Unity coordinates."""
+        with self._lock:
+            self._ready()
+            pid, hwnd = self._identity[:2]
+            return {
+                "pid": pid,
+                "hwnd": hwnd,
+                "process_created": self._client.process_created,
+                "bridge_session_generation": self._session_generation,
+                "host_instance": self._client.host_instance,
+                "viewport_width": self._viewport["width"],
+                "viewport_height": self._viewport["height"],
+                "viewport_generation": self._viewport["generation"],
+            }
 
     def read_deep_dive_board(self) -> dict:
         return self._read_deep_dive("board")

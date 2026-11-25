@@ -9,7 +9,7 @@ import cv2
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
-from ....aura_base.src.services._target_identity import read_target_identity
+from ....aura_base.src.services._target_identity import read_target_identity, target_identity_changed
 from ....aura_base.src.services.interaction_service import (
     InteractionError, InteractionService, TransitionPolicy, TransitionProbe, TransitionState,
 )
@@ -76,7 +76,7 @@ def _capture(interaction, scope, state, roi):
     try:
         return interaction.observation.capture(scope=scope, roi=roi)
     except CaptureError as exc:
-        if read_target_identity(scope.target) != state.target_identity:
+        if target_identity_changed(state.target_identity, read_target_identity(scope.target), phase="observe"):
             raise InteractionError("input_target_changed", "observe") from exc
         if exc.reason != "waiting_for_fresh_frame":
             raise
