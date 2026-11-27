@@ -143,7 +143,8 @@ def probe_depart_button(*, app, vision, check_cancelled, diagnose_oversized=Fals
     capture = app.capture(rect=region)
     check_cancelled()
     image = getattr(capture, "image", None)
-    if (not getattr(capture, "success", False) or not isinstance(image, np.ndarray)
+    if (not getattr(capture, "success", False) or getattr(capture, "stale", False)
+            or not isinstance(image, np.ndarray)
             or image.shape != (region[3], region[2], 3) or image.dtype != np.uint8):
         raise DepartButtonError("depart_capture_failed", "Unable to capture the departure-button region")
     capture_ms = round((time.monotonic()-started)*1000, 1)
