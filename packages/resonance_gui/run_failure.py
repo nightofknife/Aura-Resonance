@@ -5,10 +5,17 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from packages.resonance_shared.freight_parameters import (
+    RUBBISH_RECYCLING_UNREACHABLE,
+    RUBBISH_RECYCLING_UNREACHABLE_MESSAGE,
+)
+
 from .logic import extract_final_result, extract_status, normalize_run_payload
 
 
-_INCOMPLETE = {"failed", "error", "blocked", "timeout", "cancelled", "no_plan"}
+_INCOMPLETE = {
+    "failed", "error", "blocked", "timeout", "cancelled", "no_plan", RUBBISH_RECYCLING_UNREACHABLE,
+}
 _TASKS = {
     "enter_main": "进入主界面",
     "close_game": "关闭游戏",
@@ -69,6 +76,8 @@ _KNOWN = {
         "规划路线", "当前条件下没有预期收益为正的路线。", "请检查线路和疲劳预算。"),
     "arrival_requirements_unmet": (
         "规划路线", "当前条件下无法满足最低到达次数。", "请检查城市的最低到达次数。"),
+    RUBBISH_RECYCLING_UNREACHABLE: (
+        "规划路线", RUBBISH_RECYCLING_UNREACHABLE_MESSAGE, ""),
 }
 _STAGE_MESSAGES = {
     "list_tasks": ("加载任务", "暂时无法加载任务列表。"),

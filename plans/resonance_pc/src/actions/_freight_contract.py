@@ -165,6 +165,7 @@ def plan_view(plan: dict[str, Any], request: dict[str, Any], *, kind: str,
         result.pop(old, None)
     visits = []
     original = plan.get("city_visits") or []
+    rubbish_plan = plan.get("rubbish_recycling_plan")
     rubbish_selected = False
     threshold_recovery = bool(water_plan and water_plan.get("mode") == "thresholds")
     for index in range(len(route) + 1 if route else 0):
@@ -182,7 +183,8 @@ def plan_view(plan: dict[str, Any], request: dict[str, Any], *, kind: str,
             if auto_passenger:
                 phase("passenger_settlement", True)
             phase("investment", investment and city_id == "11")
-            eligible_rubbish = rubbish and city_id in {"7", "14"} and not rubbish_selected
+            eligible_rubbish = (index == rubbish_plan["city_index"] if rubbish_plan else
+                                rubbish and city_id in {"7", "14"} and not rubbish_selected)
             phase("rubbish_recycling", eligible_rubbish)
             rubbish_selected = rubbish_selected or eligible_rubbish
             if not threshold_recovery:

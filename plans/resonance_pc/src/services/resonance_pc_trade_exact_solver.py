@@ -21,7 +21,10 @@ from fractions import Fraction
 import heapq
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from packages.resonance_shared.freight_parameters import validate_book_limit_per_stop
+from packages.resonance_shared.freight_parameters import (
+    RUBBISH_RECYCLING_UNREACHABLE, RUBBISH_RECYCLING_UNREACHABLE_MESSAGE,
+    validate_book_limit_per_stop,
+)
 
 from .resonance_pc_trade_arrivals import normalize_required_arrivals, prepare_arrivals
 from .resonance_pc_trade_candidate_model import EdgeBookCurve, TradeEdgeOption
@@ -188,6 +191,7 @@ class ResonancePcExactTradeSolver:
         negotiation_budget: Optional[int] = None,
         required_end_city_ids: Optional[Sequence[str]] = None,
         required_arrivals: Optional[Mapping[str, int]] = None,
+        rubbish_recycling_city_ids: Optional[Sequence[str]] = None,
         fixed_route_city_ids: Optional[Sequence[str]] = None,
         reposition_to_route: bool = False,
         target_profit: Any = None,
@@ -325,12 +329,14 @@ class ResonancePcExactTradeSolver:
                             "fixed_navigation_tail_allowed": False if mode == "fixed" else None})
         route_fatigue_limit = max(fatigue_limit - reposition_fatigue, 0)
         counts = normalize_required_arrivals(required_arrivals) if mode == "free" else {}
+        recycling_cities = rubbish_recycling_city_ids if mode == "free" else None
+        requires_arrivals = bool(counts) or recycling_cities is not None
         arrivals, arrival_detail = (prepare_arrivals(
             counts, cities=planning_cities, costs=self.fatigue_costs,
-            start=start, ends=end_ids, budget=route_fatigue_limit,
-        ) if counts else (None, {}))
+            start=start, ends=end_ids, budget=route_fatigue_limit, any_of=recycling_cities,
+        ) if requires_arrivals else (None, {}))
         requested_pairs = None if fixed_path is None else set(zip(fixed_path, fixed_path[1:]))
-        curves = [] if counts and arrivals is None else self._build_edge_curves(
+        curves = [] if requires_arrivals and arrivals is None else self._build_edge_curves(
                      city_ids=planning_cities, cargo_capacity=capacity,
                     book_policy=policy, threshold=threshold, book_waste_limit=waste_limit, negotiation_policy=negotiation,
                      book_limit_per_stop=per_stop_limit,
@@ -393,6 +399,7 @@ class ResonancePcExactTradeSolver:
                                           target=target_integer, incumbent=maximum)
         status = "ok" if result is not None and (mode == "fixed" or result.expected_profit > 0) else (
                  "fixed_route_infeasible" if mode == "fixed" else
+                 RUBBISH_RECYCLING_UNREACHABLE if recycling_cities is not None else
                  "arrival_requirements_unmet" if counts else
                  "target_unreachable" if has_target else "no_plan")
         actual_profit = Fraction(0) if status != "ok" else result.expected_profit
@@ -449,6 +456,8 @@ class ResonancePcExactTradeSolver:
             request["target_profit_exact"] = self._fraction_text(target)
         if counts:
             request["required_arrivals"] = counts
+        if recycling_cities is not None:
+            request["require_rubbish_recycling"] = True
         response = {
             "status": status, "reason": None if status == "ok" else status,
             "trade_mode": mode, "book_policy": policy, "book_waste_limit": waste_limit, "negotiation_policy": negotiation,
@@ -506,6 +515,18 @@ class ResonancePcExactTradeSolver:
             }
             if status != "ok":
                 response["diagnostics"] = {**arrival_detail, "execution_allowed": False}
+        if recycling_cities is not None:
+            if status == "ok":
+                index, city = next((index, city) for index, city in enumerate(path[1:], 1)
+                                   if city in recycling_cities)
+                response["rubbish_recycling_plan"] = {
+                    "city_id": city, "city_name": self._city_name(city), "city_index": index,
+                }
+            else:
+                response["diagnostics"] = {
+                    "code": status, "message": RUBBISH_RECYCLING_UNREACHABLE_MESSAGE,
+                    "execution_allowed": False, "arrival_check": arrival_detail,
+                }
         if mode == "fixed":
             completed, partial = divmod(len(route), len(fixed_path) - 1)
             closed = fixed_path[0] == fixed_path[-1]

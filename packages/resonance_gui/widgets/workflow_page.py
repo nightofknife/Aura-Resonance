@@ -10,6 +10,7 @@ import weakref
 
 from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.observability.logging.coordinator import get_session_descriptor, subscribe
+from packages.resonance_shared.freight_parameters import RUBBISH_RECYCLING_UNREACHABLE
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -74,6 +75,8 @@ from ..logic import (
     freight_settlement_lines,
     freight_passenger_summary_text,
     freight_passenger_attention,
+    freight_rubbish_recycling_result,
+    freight_rubbish_recycling_text,
     market_fallback_notice,
     REWARD_COMPONENT_LABELS,
 )
@@ -1341,8 +1344,10 @@ class WorkflowPage(QWidget):
         self._trade_investment_enabled = bool(
             dict(trade_inputs or {}).get("auto_cape_island_investment", False)
         )
+        inputs = trade_inputs or {}
         self._trade_rubbish_recycling_enabled = bool(
-            dict(trade_inputs or {}).get("auto_rubbish_recycling", True)
+            inputs.get("auto_rubbish_recycling", True)
+            or (inputs.get("trade_mode", "free") == "free" and inputs.get("require_rubbish_recycling"))
         )
         self._freight_progress = WorkflowFreightProgressState(
             investment_enabled=self._trade_investment_enabled,
@@ -1456,6 +1461,7 @@ class WorkflowPage(QWidget):
         if not isinstance(payload, Mapping):
             return
         previous_sequence = self._freight_progress.sequence
+        previous_recycling_status = self._freight_progress.summary.get("rubbish_recycling_status")
         self._freight_progress = reduce_workflow_freight_progress(
             self._freight_progress,
             event,
@@ -1475,13 +1481,13 @@ class WorkflowPage(QWidget):
         warning = market_fallback_notice(vars(self._freight_progress))
         self.market_warning_label.setText(warning)
         self.market_warning_label.setVisible(bool(warning))
-        if (
-            str(payload.get("stage") or "") == "planning"
-            and str(payload.get("state") or "").lower() == "completed"
-        ):
+        stage = str(payload.get("stage") or "")
+        if stage == "planning" and str(payload.get("state") or "").lower() == "completed":
             self._render_runtime_trade_plan()
             self.runtime_plan_button.setEnabled(True)
-        elif str(payload.get("stage") or "").startswith("passenger_"):
+        elif stage.startswith("passenger_") or (
+            previous_recycling_status != self._freight_progress.summary.get("rubbish_recycling_status")
+        ):
             self._render_runtime_trade_plan()
         percent = self._freight_progress.percent
         self._set_internal_progress(
@@ -1497,25 +1503,35 @@ class WorkflowPage(QWidget):
         return
 
     def update_freight_market_result(self, result: Mapping[str, Any]) -> None:
-        """Terminal-result fallback when a market progress event was not delivered."""
-        if isinstance(result.get("passenger"), Mapping):
-            self._freight_progress.summary["passenger"] = dict(result["passenger"])
+        """Update the runtime plan with terminal freight information."""
+        summary = self._freight_progress.summary
+        recycling = freight_rubbish_recycling_result(result, summary)
+        summary.update(recycling)
+        recycling_blocked = result.get("planning_status") == RUBBISH_RECYCLING_UNREACHABLE
+        if recycling_blocked:
+            summary.update({key: result.get(key) for key in ("planning_status", "reason", "status", "success")})
+        has_passenger = isinstance(result.get("passenger"), Mapping)
+        if has_passenger:
+            summary["passenger"] = dict(result["passenger"])
+        if result.get("market_source"):
+            for key in ("market_source", "market_fetched_at", "market_stale_reason"):
+                setattr(self._freight_progress, key, str(result.get(key) or ""))
+            self._freight_progress.market_fallback_blocked = bool(result.get("market_fallback_blocked"))
+            warning = market_fallback_notice(vars(self._freight_progress))
+            self.market_warning_label.setText(warning)
+            self.market_warning_label.setVisible(bool(warning))
+        if recycling or recycling_blocked or has_passenger or (result.get("market_source") and self._freight_progress.route):
             self._render_runtime_trade_plan()
-        if not result.get("market_source"):
-            return
-        for key in ("market_source", "market_fetched_at", "market_stale_reason"):
-            setattr(self._freight_progress, key, str(result.get(key) or ""))
-        self._freight_progress.market_fallback_blocked = bool(result.get("market_fallback_blocked"))
-        warning = market_fallback_notice(vars(self._freight_progress))
-        self.market_warning_label.setText(warning)
-        self.market_warning_label.setVisible(bool(warning))
-        if self._freight_progress.route:
-            self._render_runtime_trade_plan()
+        if recycling or recycling_blocked:
+            self.runtime_plan_button.setEnabled(True)
 
     def finish_workflow(self, *, success: bool, message: str) -> None:
         attention = freight_passenger_attention(self._freight_progress.summary.get("passenger"), cancelled=not success)
         if attention:
             message = f"{message}；{attention}"
+        recycling = freight_rubbish_recycling_text(self._freight_progress.summary)
+        if recycling and self._freight_progress.summary.get("rubbish_recycling_status"):
+            message = f"{message} · {recycling}"
         stopped = self._stopping
         if stopped:
             for step, item in self._tree_items.items():
@@ -1653,6 +1669,8 @@ class WorkflowPage(QWidget):
         self.runtime_passenger_summary.setText(passenger_text)
         self.runtime_passenger_summary.setVisible(bool(passenger_text))
         notes = [mode, FREIGHT_NET_PROFIT_NOTE, "预计疲劳来自规划，不代表实测。"]
+        if recycling := freight_rubbish_recycling_text(summary):
+            notes.append(recycling)
         warning = market_fallback_notice(vars(self._freight_progress))
         if warning:
             notes.append(warning)

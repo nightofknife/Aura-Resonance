@@ -162,7 +162,7 @@ def _log_freight_plan(plan: dict, request: dict, *, kind: str) -> None:
         "planning_status", "snapshot_id", "expected_profit_exact", "expected_fatigue_used_exact",
         "remaining_expected_fatigue_exact", "books_used", "remaining_books", "stop_reason",
         "book_limit_per_stop",
-        "assumptions", "diagnostics", "solver_stats", "arrival_requirements",
+        "assumptions", "diagnostics", "solver_stats", "arrival_requirements", "rubbish_recycling_plan",
     )}
     logger.info("[FreightPlan] phase=completed kind=%s summary=%s", kind,
                 json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str))
@@ -2836,8 +2836,9 @@ async def _execute_trade_leg(
     }
     if (
         bool(auto_rubbish_recycling)
-        and travel_status != "blocked"
-        and bool(travel.get("success", True))
+        and travel_status in {"ok", "arrived", "completed"}
+        and travel.get("success") is True
+        and travel.get("arrival_status", "arrived") == "arrived"
         and is_rubbish_recycling_arrival(leg)
     ):
         rubbish_fields = dict(progress_fields)
@@ -3260,6 +3261,7 @@ async def _preview_trade_plan_from_start_city(
     passenger_options: Optional[Dict[str, Any]] = None,
     *,
     market_options: dict[str, Any] | None = None,
+    require_rubbish_recycling: bool = False,
 ) -> Dict[str, Any]:
     passenger_options = _attached_passenger_options(auto_passenger, passenger_options, trade_mode)
     request = normalize_planning_inputs(locals())
@@ -3426,6 +3428,7 @@ async def resonance_pc_preview_trade_plan_flow(
     market_proxy_mode: str = "automatic",
     market_proxy_port: int | None = None,
     market_source_mode: str = "automatic",
+    require_rubbish_recycling: bool = False,
 ) -> Dict[str, Any]:
     del event_bus, context
     market_options = _market_request_options(market_proxy_mode, market_proxy_port, market_source_mode)
@@ -3451,6 +3454,7 @@ async def resonance_pc_preview_trade_plan_flow(
         required_end_city_ids=required_end_city_ids,
         required_arrivals=required_arrivals,
         ignore_unmet_arrivals=ignore_unmet_arrivals,
+        require_rubbish_recycling=require_rubbish_recycling,
         city_prestige=city_prestige,
         city_tax_rates_bps=city_tax_rates_bps,
         product_unlocks=product_unlocks,
@@ -3589,6 +3593,7 @@ async def resonance_pc_auto_cycle_trade_flow(
     market_proxy_mode: str = "automatic",
     market_proxy_port: int | None = None,
     market_source_mode: str = "automatic",
+    require_rubbish_recycling: bool = False,
 ) -> Dict[str, Any]:
     del event_bus
     market_options = _market_request_options(market_proxy_mode, market_proxy_port, market_source_mode)
@@ -3606,6 +3611,7 @@ async def resonance_pc_auto_cycle_trade_flow(
                         ("auto_black_moon_local_purchase", auto_black_moon_local_purchase)):
         if type(value) is not bool:
             raise ValueError(f"{name} must be a boolean")
+    auto_rubbish_recycling = auto_rubbish_recycling or request.get("require_rubbish_recycling", False)
     medicine_limits = normalize_fatigue_medicine_limits(fatigue_medicine_limits)
     trade_goods_investment_mode = normalize_investment_mode(trade_goods_investment_mode)
     if auto_trade_goods_investment and (context is None or engine is None):

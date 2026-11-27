@@ -11,12 +11,15 @@ from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 
+from ..services._rubbish_recycling_config import (
+    RUBBISH_RECYCLING_CONFIG_PATH as _CITY_CONFIG_PATH,
+    load_rubbish_recycling_cities,
+)
 from ..services.city_shop_data_pc_service import ResonancePcCityShopDataService
 from ._rubbish_recycling_flow import RubbishRecyclingError, run_rubbish_recycling
 
 
 _PLAN_ROOT = Path(__file__).resolve().parents[2]
-_CITY_CONFIG_PATH = "data/meta/rubbish_recycling_pc.json"
 _LOCATION_PATH = "data/meta/location_pc.json"
 
 
@@ -38,7 +41,7 @@ def _resolve_plan_path(path: str) -> Path:
 def _load_city_config(config_file_path: str = _CITY_CONFIG_PATH) -> Dict[str, Dict[str, str]]:
     path = _resolve_plan_path(config_file_path)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        return load_rubbish_recycling_cities(path)
     except FileNotFoundError:
         _raise_error("rubbish_city_config_not_found", "rubbish city configuration was not found", {"path": str(path)})
     except json.JSONDecodeError as exc:
@@ -47,23 +50,12 @@ def _load_city_config(config_file_path: str = _CITY_CONFIG_PATH) -> Dict[str, Di
             "rubbish city configuration is not valid JSON",
             {"path": str(path), "cause": str(exc)},
         )
-    cities = payload.get("eligible_cities") if isinstance(payload, dict) else None
-    if not isinstance(cities, dict):
+    except ValueError as exc:
         _raise_error(
             "rubbish_city_config_invalid",
-            "rubbish city configuration must contain eligible_cities",
+            str(exc),
             {"path": str(path)},
         )
-    normalized: Dict[str, Dict[str, str]] = {}
-    for city_id, raw_city in cities.items():
-        if not isinstance(raw_city, dict):
-            continue
-        normalized[str(city_id)] = {
-            "city_name": str(raw_city.get("city_name") or "").strip(),
-            "city_key": str(raw_city.get("city_key") or "").strip(),
-            "shop_name": str(raw_city.get("shop_name") or "垃圾处理中心").strip(),
-        }
-    return normalized
 
 
 def resolve_rubbish_recycling_city(

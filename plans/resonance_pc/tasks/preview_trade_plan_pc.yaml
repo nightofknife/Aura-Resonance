@@ -186,6 +186,11 @@ preview_trade_plan_pc:
         required: false
         default: false
         description: 无法满足到达次数时，保留其他设置按普通跑商规划。
+      - name: require_rubbish_recycling
+        type: boolean
+        required: false
+        default: false
+        description: 不定线路至少到达一次设有垃圾处理中心的城市，起点不计入。
       - name: city_tax_rates_bps
         type: dict
         required: false
@@ -425,6 +430,7 @@ preview_trade_plan_pc:
         required_end_city_ids: "{{ inputs.required_end_city_ids | default(none) }}"
         required_arrivals: "{{ inputs.required_arrivals | default({}) }}"
         ignore_unmet_arrivals: "{{ inputs.ignore_unmet_arrivals | default(false) }}"
+        require_rubbish_recycling: "{{ inputs.require_rubbish_recycling | default(false) }}"
         city_prestige: "{{ inputs.city_prestige | default({'default': 20, 'overrides': {}}) }}"
         city_tax_rates_bps: "{{ inputs.city_tax_rates_bps | default({}) }}"
         product_unlocks: "{{ inputs.product_unlocks | default({'mode': 'all', 'product_ids': []}) }}"
@@ -470,6 +476,7 @@ preview_trade_plan_pc:
     stop_reason: "{{ nodes.run.output.stop_reason | default(none) }}"
     diagnostics: "{{ nodes.run.output.diagnostics | default(none) }}"
     arrival_requirements: "{{ nodes.run.output.arrival_requirements | default(none) }}"
+    rubbish_recycling_plan: "{{ nodes.run.output.rubbish_recycling_plan | default(none) }}"
     resources: "{{ nodes.run.output.resources | default(none) }}"
     success: "{{ nodes.run.output.success }}"
     preview: "{{ nodes.run.output.preview }}"
