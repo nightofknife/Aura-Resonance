@@ -300,12 +300,16 @@ class EmbeddedGameRunner:
                 if isinstance(runtime_health, Mapping)
                 else {}
             )
-            return {
+            result = {
                 "ok": True,
                 "game_name": game_name,
                 "target": summary,
                 "capture": capture,
             }
+            input_bridge_status = getattr(target_runtime, "input_bridge_status", None)
+            if callable(input_bridge_status):
+                result["input_bridge"] = input_bridge_status(summary)
+            return result
         finally:
             current_plan_name.reset(token)
 

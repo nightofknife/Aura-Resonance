@@ -184,6 +184,9 @@ class ResonancePcTargetRuntimeService(TargetRuntimeService):
             summary["client_rect"] = [0, 0, viewport["width"], viewport["height"]]
         return summary
 
+    def input_bridge_status(self, target):
+        return self.bridge.loaded_version(target.get("pid"))
+
     def list_capture_backends(self):
         if not self._use_bridge:
             return super().list_capture_backends()

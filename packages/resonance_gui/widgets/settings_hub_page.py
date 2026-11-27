@@ -51,6 +51,7 @@ class SettingsHubPage(QWidget):
         self._settings = settings
         self._hotkey_binder: Callable[[str, str], Callable[[], None]] | None = None
         self._saved_input_bridge_enabled = False
+        self._input_bridge_version: dict = {}
         self._build_ui()
         self.load_values()
 
@@ -233,8 +234,7 @@ class SettingsHubPage(QWidget):
         self.input_bridge_status = QLabel(page)
         self.input_bridge_status.setObjectName("linenInsetLabel")
         self.input_bridge_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.input_bridge_status.setMinimumWidth(152)
-        self.input_bridge_status.setToolTip("雷索纳斯 PC 已保存的桥接设置。修改后请点击保存设置。")
+        self.input_bridge_status.setMinimumWidth(228)
         self.use_input_bridge.toggled.connect(self._refresh_input_bridge_status)
         bridge_row.addWidget(self.use_input_bridge, 1)
         bridge_row.addWidget(self.input_bridge_status)
@@ -282,13 +282,43 @@ class SettingsHubPage(QWidget):
                 "如果游戏中仍加载着不支持热更新的旧版桥接器，需要重启游戏一次。",
             )
 
+    def set_input_bridge_version(self, version: dict | None) -> None:
+        self._input_bridge_version = version if isinstance(version, dict) else {"state": "unknown"}
+        self._refresh_input_bridge_status()
+
     def _refresh_input_bridge_status(self) -> None:
         enabled = self._saved_input_bridge_enabled
         text = "已启用" if enabled else "未启用"
         if self.use_input_bridge.isChecked() != enabled:
             text += "（待保存）"
+        tooltip = "雷索纳斯 PC 已保存的桥接设置。桥接任务运行时加载输入器。"
+        state = self._input_bridge_version.get("state")
+        host = self._input_bridge_version.get("host_hash")
+        bundled = self._input_bridge_version.get("bundled_hash")
+        appearance = "success" if enabled else ""
+        if state == "loaded" and host:
+            text += f" · 游戏内版本 {host[:10]}"
+            tooltip += f"\n游戏内桥接版本 SHA-256 {host}"
+            if bundled:
+                matches = host == bundled
+                text += "（与随包一致）" if matches else "（与随包不同）"
+                tooltip += f"\n随包桥接版本 SHA-256 {bundled}"
+                if not matches:
+                    appearance = "warning"
+        elif state:
+            version_text = {
+                "no_target": "未检测到游戏",
+                "unavailable": "未检测到桥接器",
+                "unloaded": "桥接器未加载",
+                "transition": "桥接器切换中",
+                "legacy": "旧版桥接器 · 版本未知",
+            }.get(state, "桥接版本未确认")
+            text += f" · {version_text}"
+            if state == "legacy":
+                appearance = "warning"
         self.input_bridge_status.setText(text)
-        self.input_bridge_status.setProperty("status", "success" if enabled else "")
+        self.input_bridge_status.setToolTip(tooltip)
+        self.input_bridge_status.setProperty("status", appearance)
         self.input_bridge_status.style().unpolish(self.input_bridge_status)
         self.input_bridge_status.style().polish(self.input_bridge_status)
 

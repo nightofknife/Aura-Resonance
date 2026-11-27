@@ -111,6 +111,10 @@ class ResonanceMainWindow(QMainWindow):
         self._shutdown_watchdog = QTimer(self)
         self._shutdown_watchdog.setInterval(15000)
         self._shutdown_watchdog.timeout.connect(self._on_shutdown_timeout)
+        self._bridge_status_timer = QTimer(self)
+        self._bridge_status_timer.setSingleShot(True)
+        self._bridge_status_timer.setInterval(3000)
+        self._bridge_status_timer.timeout.connect(self.requestRefreshTarget.emit)
         self._history_rows: list[dict[str, Any]] = []
         self._busy = False
         self._active_game_name = ""
@@ -414,6 +418,9 @@ class ResonanceMainWindow(QMainWindow):
         self.primary_nav_group.setExclusive(True)
         self.tutorial_button.setChecked(name == "tutorial")
         self.back_to_workflow_button.setVisible(name in {"history", "tutorial"})
+        self._bridge_status_timer.stop()
+        if name == "settings":
+            self.requestRefreshTarget.emit()
         if name == "history":
             self.requestRefreshHistory.emit()
 
@@ -1606,6 +1613,10 @@ class ResonanceMainWindow(QMainWindow):
             self.workflow_page.append_log(message, persist=False)
 
     def _set_global_target_status(self, payload: dict[str, Any]) -> None:
+        self.settings_page.set_input_bridge_version(payload.get("input_bridge"))
+        if (not self._closing and not self.page_stack.isHidden()
+                and self.page_stack.currentWidget() is self.settings_page):
+            self._bridge_status_timer.start()
         target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
         ready = bool(payload.get("ok")) and bool(target.get("visible", True))
         self.global_target_label.setText(
@@ -1677,6 +1688,7 @@ class ResonanceMainWindow(QMainWindow):
         self._hotkeys.close()
         event.ignore()
         self._closing = True
+        self._bridge_status_timer.stop()
         self._workflow_active = False
         self._workflow_pending.clear()
         self.centralWidget().setEnabled(False)
