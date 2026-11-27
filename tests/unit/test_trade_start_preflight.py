@@ -11,12 +11,12 @@ from plans.resonance_pc.src.actions import _depart_button_vision as departure
 from plans.resonance_pc.src.actions import runtime_preflight_pc_actions as preflight
 
 
-@pytest.mark.parametrize(("layout", "expected_error"), [
-    ("standard", None),
-    ("oversized", "trade_start_hud_oversized"),
-    ("unknown", "trade_start_screen_unconfirmed"),
+@pytest.mark.parametrize(("layout", "expected_error", "elapsed"), [
+    ("standard", None, 2.0),
+    ("oversized", "trade_start_hud_oversized", 5.0),
+    ("unknown", "trade_start_screen_unconfirmed", 5.0),
 ])
-def test_trade_start_classifies_the_departure_button_with_one_capture(layout, expected_error):
+def test_trade_start_polls_for_stable_departure_button(monkeypatch, layout, expected_error, elapsed):
     image = np.full((100, 160, 3), 17, np.uint8)
     if layout == "standard":
         fixture = Path(__file__).resolve().parents[1] / "fixtures/depart_button/actual-matched-crop.png"
@@ -25,7 +25,16 @@ def test_trade_start_classifies_the_departure_button_with_one_capture(layout, ex
     elif layout == "oversized":
         image[20:71, 17:147] = departure._load_oversized_template()
 
+    clock = SimpleNamespace(now=0.0)
     captures = []
+
+    def sleep(scope, seconds):
+        clock.now += min(seconds, scope.remaining)
+        scope.checkpoint()
+
+    monkeypatch.setattr(preflight, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(preflight, "POLL_INTERVAL", 0.5)
+    monkeypatch.setattr(preflight.OperationScope, "sleep", sleep)
 
     def capture(*, rect):
         captures.append(rect)
@@ -40,7 +49,9 @@ def test_trade_start_classifies_the_departure_button_with_one_capture(layout, ex
         with pytest.raises(departure.DepartButtonError) as failure:
             preflight.resonance_pc_require_trade_start_screen(app=app, vision=vision)
         assert failure.value.code == expected_error
-    assert captures == [departure.REGION]
+    assert clock.now == elapsed
+    assert len(captures) > 1
+    assert all(region == departure.REGION for region in captures)
 
 
 def test_freight_waits_for_preflight_and_preflight_requires_resolution_first():
