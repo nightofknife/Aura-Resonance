@@ -448,6 +448,8 @@ def _enemy_wait(state, *, before=None, actions_exhausted=False, observed=False):
     state['waiting_round'] = before['rounds_remaining'] if before is not None else state.get('rounds_remaining')
     state['waiting_actions_exhausted'] = actions_exhausted
     state['enemy_seen'] = bool(observed)
+    # Keep the map identity for a direct Boss encounter after discarding the scan.
+    state['waiting_map_id'] = ((state.get('layout') or {}).get('native_board') or {}).get('map_id')
     _invalidate(state, 'enemy_stage')
     _phase(state, 'enemy_wait')
 
@@ -458,6 +460,7 @@ def _next_player_round(state, hud, evidence):
     _log(state, 'new_player_round_observed', evidence=evidence, rounds_remaining=hud['rounds_remaining'])
     state.pop('waiting_round', None)
     state.pop('waiting_actions_exhausted', None)
+    state.pop('waiting_map_id', None)
     state['enemy_seen'] = False
     _invalidate(state, 'new_player_round_observed')
     _phase(state, 'scan_turn')
@@ -1080,17 +1083,20 @@ def _action_outcome(state, image, observation, hud):
             _enemy_wait(state, before=before)
 
 
-async def _direct_boss_formation_cell(state, app, observation):
+async def _direct_boss_formation_cell(state, app, observation, *, map_id=None):
+    if map_id is None:
+        map_id = ((state.get('layout') or {}).get('native_board') or {}).get('map_id')
+    if map_id is None:
+        return None
     if not is_formation_page(observation) or not _stable_scene(state, observation):
         return None
     try:
         board = await _owned(asyncio.to_thread(app.controller.bridge.read_deep_dive_board))
     except TargetRuntimeError as error:
-        if error.code in {'deep_dive_board_busy', 'deep_dive_board_unavailable'}:
+        if error.code in {'deep_dive_board_busy', 'deep_dive_board_unavailable', 'deep_dive_turn_unavailable'}:
             return None
         raise
-    map_id = ((state.get('layout') or {}).get('native_board') or {}).get('map_id')
-    if (map_id is None or board.get('map_id') != map_id or
+    if (board.get('map_id') != map_id or
             board['turn']['plane_index'] != state['plane_index'] or
             board['turn']['moves_left'] != 0 or board['turn']['rotations_left'] != 0):
         return None
@@ -1113,15 +1119,17 @@ async def _boss_formation_after_reward(state, app, observation, context):
     return destination == await _direct_boss_formation_cell(state, app, observation)
 
 
-def _handoff_to_enemy_boss_formation(state, **evidence):
+def _handoff_to_enemy_boss_formation(state, *, battle_level=None, **evidence):
     _commit_action(state, dict(accepted_stage='enemy_boss_formation', **evidence))
     _invalidate(state, 'enemy_boss_formation')
     now = time.monotonic()
-    state['event_stack'].append(create_context('boss_battle', 'enemy_move_encounter', now,
-                                               resume='plane_transition'))
+    context = create_context('boss_battle', 'enemy_move_encounter', now, resume='plane_transition')
+    if battle_level is not None:
+        context['battle_level'] = battle_level
+    state['event_stack'].append(context)
     _phase(state, 'event_dispatch')
     state['phase_started'] = now
-    _log(state, 'enemy_boss_formation_confirmed')
+    _log(state, 'enemy_boss_formation_confirmed', level_id=battle_level)
 
 
 async def _battle_node_consumed_after_reward(state, app, observation, context, now):
@@ -1188,7 +1196,9 @@ async def _events(state, app, image, observation):
     if (context.get('battle_level') and context['phase'] == 'entry_wait' and formation_seen
             and formation_level is not None and formation_level != context['battle_level']):
         if _stable_scene(state, observation):
-            _stop(state, 'vortex_battle_level_mismatch', image)
+            reason = ('boss_formation_level_mismatch' if context['event_type'] == 'boss_battle'
+                      else 'vortex_battle_level_mismatch')
+            _stop(state, reason, image)
         return
     if (context['event_type'] in {'battle', 'elite_battle', 'boss_battle'}
             and context['phase'] == 'entry_wait'
@@ -1416,6 +1426,12 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
             await _boss_from_enemy(state, app, image, observation)
         else:
             _stop(state, 'event_owner_unknown', image)
+        return
+    if waiting_for_player and state.get('waiting_map_id') is not None and is_formation_page(observation):
+        level = observation.get('formation_level_id')
+        if level is not None and await _direct_boss_formation_cell(
+                state, app, observation, map_id=state['waiting_map_id']):
+            _handoff_to_enemy_boss_formation(state, battle_level=level)
         return
     if scene in {'battle_formation', 'battle_victory'}:
         _stop(state, 'battle_owner_unknown', image)
