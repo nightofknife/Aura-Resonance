@@ -1,5 +1,6 @@
 """Weekly battle settings survive persistence and legacy migration."""
 from copy import deepcopy
+from datetime import datetime, timedelta
 import json
 
 import pytest
@@ -8,8 +9,9 @@ from PySide6.QtCore import QSettings
 from packages.resonance_gui.battle_plan import (
     battle_editor_day_summary, normalize_battle_editor_inputs,
 )
+from packages.resonance_gui.battle_catalog import battle_catalog_path
 from packages.resonance_gui.config_repository import ResonanceConfigRepository
-from packages.resonance_shared.battle_schedule import WEEKDAYS
+from packages.resonance_shared.battle_schedule import WEEKDAYS, resolve_battle_plan
 
 
 def test_empty_defaults_keep_seven_independent_days():
@@ -67,6 +69,28 @@ def test_repository_round_trip_does_not_resolve_week_to_current_day(tmp_path):
     repository.save_battle_inputs(inputs)
     reopened = ResonanceConfigRepository(QSettings(str(filename), QSettings.Format.IniFormat))
     assert reopened.load_battle_inputs() == normalize_battle_editor_inputs(inputs)
+
+
+def test_fresh_preferences_load_default_week_with_open_routes(tmp_path):
+    settings = QSettings(str(tmp_path / "fresh.ini"), QSettings.Format.IniFormat)
+    repository = ResonanceConfigRepository(settings)
+    weekly_plan = repository.load_battle_inputs()["weekly_plan"]
+    catalog = json.loads(battle_catalog_path().read_text(encoding="utf-8"))
+    monday = datetime(2026, 11, 23, 5)
+    supply_stages = ("standard", "savior", "elegant", "cutting_edge", "chaos", "magic", "savior")
+
+    assert list(weekly_plan["days"]) == list(WEEKDAYS)
+    for offset, stage in enumerate(supply_stages):
+        day = resolve_battle_plan(weekly_plan=weekly_plan, now=monday + timedelta(days=offset), catalog=catalog)
+        expected_routes = [f"gp.action_summary.global_supply.{stage}"]
+        if offset == 0:
+            expected_routes.insert(0, "gp.action_summary.smuggler_crackdown.blind_box")
+        assert day["weekday"] == WEEKDAYS[offset]
+        assert day["jobs"] == [
+            {"route_id": route, "difficulty": 6, "run_count": 3} for route in expected_routes
+        ]
+        assert day["structural_types"] == ["birch_buoy", "echo_buoy"]
+    assert not settings.contains("battle/inputs_json")
 
 
 def test_loading_legacy_preferences_migrates_in_memory_without_overwriting_file(tmp_path):

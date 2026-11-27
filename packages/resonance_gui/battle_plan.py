@@ -12,6 +12,29 @@ from packages.resonance_shared.battle_schedule import (
 from .battle_catalog import STRUCTURAL_STAGE_LABELS, battle_catalog_path
 
 
+def default_battle_editor_inputs() -> dict[str, Any]:
+    routes_by_day = {
+        "mon": ("smuggler_crackdown.blind_box", "global_supply.standard"),
+        "tue": ("global_supply.savior",),
+        "wed": ("global_supply.elegant",),
+        "thu": ("global_supply.cutting_edge",),
+        "fri": ("global_supply.chaos",),
+        "sat": ("global_supply.magic",),
+        "sun": ("global_supply.savior",),
+    }
+    days = {
+        weekday: {
+            "jobs": [
+                {"route_id": f"gp.action_summary.{route}", "difficulty": 6, "run_count": 3}
+                for route in routes
+            ],
+            "structural_types": ["birch_buoy", "echo_buoy"],
+        }
+        for weekday, routes in routes_by_day.items()
+    }
+    return {"weekly_plan": {"schema_version": 1, "days": days}}
+
+
 def normalize_battle_editor_inputs(values: Mapping[str, Any]) -> dict[str, Any]:
     """Keep a whole week; migrate a formerly repeated daily list once in memory.
 
