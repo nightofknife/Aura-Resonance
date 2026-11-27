@@ -50,6 +50,7 @@ class SettingsHubPage(QWidget):
         super().__init__(parent)
         self._settings = settings
         self._hotkey_binder: Callable[[str, str], Callable[[], None]] | None = None
+        self._saved_input_bridge_enabled = False
         self._build_ui()
         self.load_values()
 
@@ -225,10 +226,19 @@ class SettingsHubPage(QWidget):
         two_columns.addWidget(close, 1)
         layout.addLayout(two_columns)
 
+        bridge_row = QHBoxLayout()
         self.use_input_bridge = QCheckBox("使用桥接输入器", page)
         self.use_input_bridge.setToolTip("保存设置后，下一次桥接任务会自动加载输入器。")
         self.use_input_bridge.clicked.connect(self._show_bridge_warning)
-        layout.addWidget(self.use_input_bridge)
+        self.input_bridge_status = QLabel(page)
+        self.input_bridge_status.setObjectName("linenInsetLabel")
+        self.input_bridge_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.input_bridge_status.setMinimumWidth(152)
+        self.input_bridge_status.setToolTip("雷索纳斯 PC 已保存的桥接设置。修改后请点击保存设置。")
+        self.use_input_bridge.toggled.connect(self._refresh_input_bridge_status)
+        bridge_row.addWidget(self.use_input_bridge, 1)
+        bridge_row.addWidget(self.input_bridge_status)
+        layout.addLayout(bridge_row)
 
         advanced = QPushButton("高级参数  ›", page)
         advanced.setObjectName("quietButton")
@@ -271,6 +281,16 @@ class SettingsHubPage(QWidget):
                 "保存设置后，下一次桥接任务会自动加载输入器。"
                 "如果游戏中仍加载着不支持热更新的旧版桥接器，需要重启游戏一次。",
             )
+
+    def _refresh_input_bridge_status(self) -> None:
+        enabled = self._saved_input_bridge_enabled
+        text = "已启用" if enabled else "未启用"
+        if self.use_input_bridge.isChecked() != enabled:
+            text += "（待保存）"
+        self.input_bridge_status.setText(text)
+        self.input_bridge_status.setProperty("status", "success" if enabled else "")
+        self.input_bridge_status.style().unpolish(self.input_bridge_status)
+        self.input_bridge_status.style().polish(self.input_bridge_status)
 
     @staticmethod
     def _section(text: str, parent: QWidget) -> QLabel:
@@ -342,7 +362,9 @@ class SettingsHubPage(QWidget):
             self.show_hotkey_status(f"保存的快捷键无效，请重新设置：{invalid_hotkey}", error=True)
         self.executable_path.setText(str(self._settings.value("game/executable_path", "") or ""))
         self.launch_if_needed.setChecked(self._bool_value("game/launch_if_not_running", True))
-        self.use_input_bridge.setChecked(self._bool_value("game/use_input_bridge", False))
+        self._saved_input_bridge_enabled = self._bool_value("game/use_input_bridge", False)
+        self.use_input_bridge.setChecked(self._saved_input_bridge_enabled)
+        self._refresh_input_bridge_status()
         self.window_timeout.setValue(int(self._settings.value("game/window_timeout_sec", 90)))
         self.settle_rounds.setValue(int(self._settings.value("game/max_settle_rounds", 300)))
         force = self._bool_value("game/force_after_timeout", True)
@@ -384,6 +406,8 @@ class SettingsHubPage(QWidget):
         except OSError as exc:
             self.save_result.setText(f"设置保存失败：{exc}")
             return
+        self._saved_input_bridge_enabled = self.use_input_bridge.isChecked()
+        self._refresh_input_bridge_status()
         if not path:
             self.gamePathSaved.emit("")
         undo_hotkeys: Callable[[], None] | None = None

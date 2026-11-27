@@ -31,6 +31,7 @@ def test_checkbox_defaults_warning_and_persistence(repository, monkeypatch):
     page = SettingsHubPage(repository)
     assert not page.use_input_bridge.isChecked()
     assert page.use_input_bridge.text() == "使用桥接输入器"
+    assert page.input_bridge_status.text() == "未启用"
     page.use_input_bridge.click()
     warning.assert_called_once_with(
         page,
@@ -40,14 +41,34 @@ def test_checkbox_defaults_warning_and_persistence(repository, monkeypatch):
         "如果游戏中仍加载着不支持热更新的旧版桥接器，需要重启游戏一次。",
     )
     assert not repository.value("game/use_input_bridge", False)
+    assert page.input_bridge_status.text() == "未启用（待保存）"
     page.save_values()
+    assert page.input_bridge_status.text() == "已启用"
     restored = SettingsHubPage(repository)
     assert restored.use_input_bridge.isChecked()
+    assert restored.input_bridge_status.text() == "已启用"
     assert warning.call_count == 1
+    restored.use_input_bridge.click()
+    assert restored.input_bridge_status.text() == "已启用（待保存）"
+    restored._cancel()
+    assert restored.use_input_bridge.isChecked()
+    assert restored.input_bridge_status.text() == "已启用"
     restored.use_input_bridge.click()
     restored.save_values()
     assert not repository.value("game/use_input_bridge", False)
+    assert restored.input_bridge_status.text() == "未启用"
     assert warning.call_count == 1
+
+
+def test_bridge_status_keeps_saved_value_when_save_fails(repository, monkeypatch):
+    page = SettingsHubPage(repository)
+    page.use_input_bridge.setChecked(True)
+    monkeypatch.setattr(repository, "sync_checked", Mock(side_effect=OSError("不可写")))
+
+    page.save_values()
+
+    assert page.input_bridge_status.text() == "未启用（待保存）"
+    assert "设置保存失败" in page.save_result.text()
 
 
 def test_main_window_sync_locks_during_work(repository):
