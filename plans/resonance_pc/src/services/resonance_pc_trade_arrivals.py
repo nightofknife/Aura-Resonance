@@ -30,12 +30,15 @@ class ArrivalSearch:
     complete: tuple[int, ...]
     slots: dict[str, int]
     remaining_movement: dict[tuple[str, tuple[int, ...]], int]
+    any_of: frozenset[str] = frozenset()
 
     def arrive(self, counts: tuple[int, ...], city: str) -> tuple[int, ...]:
         slot = self.slots.get(city)
-        if slot is None or counts[slot] == 0:
-            return counts
-        return counts[:slot] + (counts[slot] - 1,) + counts[slot + 1:]
+        if slot is not None and counts[slot]:
+            counts = counts[:slot] + (counts[slot] - 1,) + counts[slot + 1:]
+        if city in self.any_of and counts[-1]:
+            counts = counts[:-1] + (0,)
+        return counts
 
 
 def prepare_arrivals(
@@ -46,6 +49,7 @@ def prepare_arrivals(
     start: str,
     ends: Sequence[str] | None,
     budget: int,
+    any_of: Sequence[str] | None = None,
 ) -> tuple[ArrivalSearch | None, dict]:
     """Reverse shortest paths for the remaining arrival counts and legal end.
 
@@ -62,11 +66,15 @@ def prepare_arrivals(
     isolated = [city for city in required if not incoming[city]]
     if isolated:
         return None, {"code": "arrival_city_unreachable", "city_ids": isolated}
-    initial = tuple(required.values())
+    group = frozenset(city for city in (any_of or ()) if incoming.get(city))
+    if any_of is not None and not group:
+        return None, {"code": "arrival_group_unreachable"}
+    initial = tuple(required.values()) + ((1,) if group else ())
     complete = (0,) * len(initial)
     slots = {city: index for index, city in enumerate(required)}
     cheapest = [min(cost for _, cost in incoming[city]) for city in required]
-    total_min = sum(count * cost for count, cost in zip(initial, cheapest))
+    # A single arrival can satisfy both the city count and the group visit.
+    total_min = sum(count * cost for count, cost in zip(required.values(), cheapest))
     if total_min > budget:
         return None, {"code": "arrival_movement_budget", "movement_lower_bound": total_min}
     # Search a little past the budget to report an exact minimum for a near
@@ -86,6 +94,9 @@ def prepare_arrivals(
         distances[key] = cost
         if key == (start, initial) and cost > budget:
             return None, {"code": "arrival_movement_budget", "minimum_movement_fatigue": cost}
+        group_arrival = city in group
+        if group_arrival and counts[-1]:
+            continue  # Arriving here would already have cleared the group bit.
         slot = slots.get(city)
         previous = []
         if slot is None or counts[slot] == 0:
@@ -93,6 +104,8 @@ def prepare_arrivals(
         if slot is not None and counts[slot] < initial[slot]:
             previous.append((counts[:slot] + (counts[slot] + 1,) + counts[slot + 1:],
                              prefix_bound - cheapest[slot]))
+        if group_arrival:
+            previous += [(prior[:-1] + (1,), bound) for prior, bound in previous]
         for other, step in incoming[city]:
             total = cost + step
             for previous_counts, bound in previous:
@@ -107,4 +120,4 @@ def prepare_arrivals(
     minimum = distances.get((start, initial))
     if minimum is None:
         return None, {"code": "arrival_movement_budget" if beyond_ceiling else "arrival_route_unreachable"}
-    return ArrivalSearch(initial, complete, slots, distances), {"minimum_movement_fatigue": minimum}
+    return ArrivalSearch(initial, complete, slots, distances, group), {"minimum_movement_fatigue": minimum}

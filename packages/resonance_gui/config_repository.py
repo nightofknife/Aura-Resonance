@@ -106,6 +106,7 @@ DEFAULT_TRADE_INPUTS: dict[str, Any] = {
     "required_end_city_ids": None,
     "required_arrivals": {},
     "ignore_unmet_arrivals": False,
+    "require_rubbish_recycling": False,
     "city_prestige": {"default": 20, "overrides": {}},
     "city_tax_rates_bps": {},
     "product_unlocks": {"mode": "all", "product_ids": []},
@@ -164,6 +165,7 @@ TRADE_PREVIEW_INPUT_KEYS: tuple[str, ...] = (
     "required_end_city_ids",
     "required_arrivals",
     "ignore_unmet_arrivals",
+    "require_rubbish_recycling",
     "city_prestige",
     "city_tax_rates_bps",
     "product_unlocks",
@@ -563,6 +565,8 @@ def _merge_trade_inputs(values: dict[str, Any]) -> dict[str, Any]:
     merged["required_arrivals"] = dict(arrivals)
     if type(merged["ignore_unmet_arrivals"]) is not bool:
         raise ValueError("忽略指定到达次数的选项必须为布尔值。")
+    if type(merged["require_rubbish_recycling"]) is not bool:
+        raise ValueError("倒一次垃圾开关必须为布尔值。")
     budget = merged["book_budget"]
     if budget is not None and (type(budget) is not int or budget < 0):
         raise ValueError("进货书必须为非负整数或无限。")

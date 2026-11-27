@@ -14,6 +14,7 @@ from packages.aura_core.api import service_info
 from packages.resonance_shared.freight_parameters import validate_book_limit_per_stop
 
 from ._buy_lot_normalization import normalize_city_product_buy_lot
+from ._rubbish_recycling_config import RUBBISH_RECYCLING_CONFIG_PATH, load_rubbish_recycling_cities
 from .resonance_pc_market_data_service import (
     ResonancePcMarketDataError,
     ResonancePcMarketDataService,
@@ -148,6 +149,7 @@ class ResonancePcTradePlannerService:
         required_end_city_ids: Optional[List[str]] = None,
         required_arrivals: Optional[Dict[str, int]] = None,
         ignore_unmet_arrivals: bool = False,
+        require_rubbish_recycling: bool = False,
         city_prestige: Optional[Dict[str, Any]] = None,
         city_tax_rates_bps: Optional[Dict[str, Any]] = None,
         product_unlocks: Optional[Dict[str, Any]] = None,
@@ -190,6 +192,8 @@ class ResonancePcTradePlannerService:
             counts = normalize_required_arrivals(required_arrivals) if mode == "free" else {}
             if counts and type(ignore_unmet_arrivals) is not bool:
                 raise ValueError("ignore_unmet_arrivals must be a boolean")
+            if mode == "free" and type(require_rubbish_recycling) is not bool:
+                raise ValueError("require_rubbish_recycling must be a boolean")
         except ValueError as exc:
             raise ResonancePcTradePlannerError(code="invalid_optimal_route_input", message=str(exc)) from exc
 
@@ -340,6 +344,15 @@ class ResonancePcTradePlannerService:
         }
         if counts:
             planning_inputs["required_arrivals"] = counts
+        if mode == "free" and require_rubbish_recycling:
+            path = self.plan_root / RUBBISH_RECYCLING_CONFIG_PATH
+            try:
+                recycling_cities = load_rubbish_recycling_cities(path)
+            except (OSError, ValueError) as exc:
+                raise ResonancePcTradePlannerError(
+                    code="rubbish_city_config_invalid", message=str(exc), detail={"path": str(path)},
+                ) from exc
+            planning_inputs["rubbish_recycling_city_ids"] = sorted(recycling_cities.keys() & set(allowed_city_ids))
         cache_key = self._optimal_route_cache_key(
             snapshot=snapshot, fatigue_payload=fatigue_payload, buy_lot_payload=buy_lot_payload,
             product_unlocks_payload=product_unlocks_payload, trade_rules_payload=trade_rules_payload,
@@ -369,9 +382,9 @@ class ResonancePcTradePlannerService:
             if arrivals and arrivals["status"] == "unmet":
                 message = self._arrival_failure_message(arrivals, fatigue_budget)
                 if ignore_unmet_arrivals:
-                    ordinary_inputs = {key: value for key, value in planning_inputs.items()
-                                       if key != "required_arrivals"}
-                    result = solver.solve(**ordinary_inputs)
+                    relaxed_inputs = dict(planning_inputs)
+                    relaxed_inputs.pop("required_arrivals")
+                    result = solver.solve(**relaxed_inputs)
                     path = result["city_path_ids"][1:]
                     arrivals.update(
                         status="ignored",

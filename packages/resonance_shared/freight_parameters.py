@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 FREIGHT_MODES = ("free", "fixed")
+RUBBISH_RECYCLING_UNREACHABLE = "rubbish_recycling_unreachable"
+RUBBISH_RECYCLING_UNREACHABLE_MESSAGE = "当前疲劳预算不支持『倒一次垃圾』选项。"
 FATIGUE_MEDICINES = {
     "lollipop": "提神棒棒糖",
     "gum": "提神口香糖",
@@ -65,7 +67,7 @@ FREIGHT_PLANNING_KEYS = (
     "book_profit_threshold", "book_waste_limit", "book_policy", "negotiation_policy",
     "fixed_route_city_ids", "reposition_to_route", "target_profit",
     "available_city_ids", "required_end_city_ids", "city_prestige", "city_tax_rates_bps",
-    "required_arrivals", "ignore_unmet_arrivals",
+    "required_arrivals", "ignore_unmet_arrivals", "require_rubbish_recycling",
     "product_unlocks", "bargain_success_rates_bps", "bargain_step_bps",
     "raise_success_rates_bps", "raise_step_bps",
 )
@@ -80,7 +82,7 @@ def effective_freight_inputs(source: Mapping[str, Any]) -> dict[str, Any]:
     result["trade_mode"] = mode
     if mode == "fixed":
         for key in ("available_city_ids", "required_end_city_ids", "target_profit",
-                    "required_arrivals", "ignore_unmet_arrivals"):
+                    "required_arrivals", "ignore_unmet_arrivals", "require_rubbish_recycling"):
             result.pop(key, None)
     else:
         for key in ("fixed_route_city_ids", "reposition_to_route"):
@@ -90,6 +92,11 @@ def effective_freight_inputs(source: Mapping[str, Any]) -> dict[str, Any]:
         if result.get("required_arrivals") in (None, {}):
             result.pop("required_arrivals", None)
             result.pop("ignore_unmet_arrivals", None)
+        require_rubbish_recycling = result.get("require_rubbish_recycling", False)
+        if type(require_rubbish_recycling) is not bool:
+            raise ValueError("倒一次垃圾开关必须为布尔值。")
+        if not require_rubbish_recycling:
+            result.pop("require_rubbish_recycling", None)
     result.pop("target_profit_enabled", None)
     result.pop("book_limit_per_stop_draft", None)
     if type(result.get("book_budget")) is int and result["book_budget"] == 0:

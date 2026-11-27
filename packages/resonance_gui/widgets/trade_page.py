@@ -64,6 +64,8 @@ from ..logic import (
     freight_settlement_lines,
     freight_passenger_summary_text,
     freight_passenger_attention,
+    freight_rubbish_recycling_result,
+    freight_rubbish_recycling_text,
     extract_freight_passenger_cleanup_evidence,
     market_fallback_notice,
     validate_allow_stale_market,
@@ -82,6 +84,8 @@ from ..logic import (
 from packages.resonance_shared.freight_parameters import (
     FATIGUE_MEDICINES, FATIGUE_MEDICINE_LIMIT_MAX, FREIGHT_PLANNING_KEYS, FREIGHT_RECOVERY_THRESHOLD_KEYS,
     DEFAULT_RECOVERY_THRESHOLDS,
+    RUBBISH_RECYCLING_UNREACHABLE,
+    RUBBISH_RECYCLING_UNREACHABLE_MESSAGE,
     freight_control_state, normalize_fatigue_medicine_limits, validate_freight_recovery_thresholds,
 )
 from packages.resonance_shared.market_proxy import normalize_market_proxy
@@ -760,6 +764,12 @@ class TradePage(QWidget):
         rows.addWidget(self.ignore_unmet_arrivals, 0, Qt.AlignmentFlag.AlignLeft)
         parameter_divider(rows)
 
+        self.require_rubbish_recycling = FreightSwitch("倒一次垃圾", settings)
+        self.require_rubbish_recycling.setToolTip("路线必须至少驶入一次有垃圾处理中心的站点，出发时所在城市不计。正式货运到站后会执行回收。")
+        self.require_rubbish_recycling.toggled.connect(self._arrival_inputs_changed)
+        parameter_row(rows, "倒一次垃圾", self.require_rubbish_recycling)
+        parameter_divider(rows)
+
         self.target_profit_enabled = FreightSwitch("预计净收益目标", settings)
         self.target_profit_enabled.setToolTip("在疲劳上限内，寻找达到预计净收益目标的最低疲劳路线；已计入买入税与卖出利润税。")
         parameter_row(rows, "预计净收益目标", self.target_profit_enabled)
@@ -1078,6 +1088,7 @@ class TradePage(QWidget):
         self.nonfixed_panel.setVisible(state["free"])
         self.fixed_panel.setVisible(state["fixed"])
         self.arrivals_button.setEnabled(state["free"] and not self._busy)
+        self.require_rubbish_recycling.setEnabled(state["free"] and not self._busy)
         self.ignore_unmet_arrivals.setVisible(bool(self._required_arrivals))
         self.ignore_unmet_arrivals.setEnabled(not self._busy and state["free"] and bool(self._required_arrivals))
         self.arrivals_note.setText("、".join(f"{name} ≥ {self._required_arrivals[city]} 次"
@@ -1424,6 +1435,11 @@ class TradePage(QWidget):
         self.passenger_summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.passenger_summary_label.hide()
         result_layout.addWidget(self.passenger_summary_label)
+        self.rubbish_recycling_summary_label = QLabel("", self.result_band)
+        self.rubbish_recycling_summary_label.setWordWrap(True)
+        self.rubbish_recycling_summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.rubbish_recycling_summary_label.hide()
+        result_layout.addWidget(self.rubbish_recycling_summary_label)
         self.reason_label = QLabel("", self.result_band)
         self.reason_label.setWordWrap(True)
         self.reason_label.setProperty("status", "error")
@@ -1734,6 +1750,7 @@ class TradePage(QWidget):
         self.target_profit_enabled.setChecked(bool(values.get("target_profit_enabled", False)))
         self._required_arrivals = dict(values.get("required_arrivals") or {})
         self.ignore_unmet_arrivals.setChecked(bool(values.get("ignore_unmet_arrivals", False)))
+        self.require_rubbish_recycling.setChecked(bool(values.get("require_rubbish_recycling", False)))
         self.book_policy.setCurrentIndex(max(self.book_policy.findData(values.get("book_policy", "profit")), 0))
         self.negotiation_policy.setCurrentIndex(max(self.negotiation_policy.findData(values.get("negotiation_policy", "auto")), 0))
         self.fixed_route.clear()
@@ -1898,7 +1915,8 @@ class TradePage(QWidget):
             inputs.update(fixed_route_city_ids=route, reposition_to_route=self.reposition_to_route.isChecked())
         if mode == "free" or _draft:
             inputs.update(required_arrivals=dict(self._required_arrivals),
-                          ignore_unmet_arrivals=self.ignore_unmet_arrivals.isChecked())
+                          ignore_unmet_arrivals=self.ignore_unmet_arrivals.isChecked(),
+                          require_rubbish_recycling=self.require_rubbish_recycling.isChecked())
         if (mode == "free" and self.target_profit_enabled.isChecked()) or _draft:
             target = self._amount_base_units(self.target_profit)
             if not _draft and target <= 0:
@@ -2165,6 +2183,8 @@ class TradePage(QWidget):
     def begin_run(self, payload: Mapping[str, Any]) -> None:
         self.market_warning_label.clear()
         self.market_warning_label.hide()
+        self.rubbish_recycling_summary_label.clear()
+        self.rubbish_recycling_summary_label.hide()
         self._active_mode = "run"
         self._current_cid = str(payload.get("cid") or extract_run_id(payload))
         self._progress = TradeProgressState(cid=self._current_cid)
@@ -2263,6 +2283,7 @@ class TradePage(QWidget):
         self._last_result = dict(payload)
         status = extract_status(payload)
         summary = trade_result_summary(payload)
+        summary.update(freight_rubbish_recycling_result(summary, self._progress.summary))
         passenger = extract_freight_passenger_cleanup_evidence(payload, expected_cid=self._current_cid)
         if not passenger and not isinstance(summary.get("passenger"), Mapping):
             passenger = self._progress.summary.get("passenger")
@@ -2278,14 +2299,16 @@ class TradePage(QWidget):
         failure = present_run_failure(payload, task_label="PC 自动跑商")
         self.run_status_value.setText(self._status_label(business_status))
         self.stage_title.setText(self._status_label(business_status))
-        detail = failure.text if failure else str(summary.get("reason") or "路线执行结束")
+        recycling_blocked = summary.get("planning_status") == RUBBISH_RECYCLING_UNREACHABLE
+        detail = (RUBBISH_RECYCLING_UNREACHABLE_MESSAGE if recycling_blocked else
+                  failure.text if failure else str(summary.get("reason") or "路线执行结束"))
         attention = freight_passenger_attention(summary.get("passenger"), cancelled=business_status in {"cancelled", "failed", "error", "timeout"})
         self.stage_detail.setText(f"{detail}\n{attention}" if attention else detail)
         if summary.get("snapshot_id"):
             self.snapshot_value.setText(str(summary["snapshot_id"]))
         if summary.get("final_city"):
             self.city_value.setText(str(summary["final_city"]))
-        if summary.get("route"):
+        if summary.get("route") or recycling_blocked:
             self._render_route(summary["route"], book_limit_per_stop=summary.get("book_limit_per_stop"))
         if business_status in {"success", "completed", "ok"}:
             for index in range(len(summary.get("route") or [])):
@@ -2340,8 +2363,11 @@ class TradePage(QWidget):
             self._current_plan = dict(summary)
         self.run_status_value.setText("无可执行路线" if no_plan else "方案就绪")
         self.stage_title.setText("无可执行路线" if no_plan else "方案已计算")
+        no_plan_detail = (RUBBISH_RECYCLING_UNREACHABLE_MESSAGE
+                          if summary.get("planning_status") == RUBBISH_RECYCLING_UNREACHABLE
+                          else str(summary.get("reason") or "当前规划参数下无可执行路线"))
         self.stage_detail.setText(
-            str(summary.get("reason") or "当前规划参数下无可执行路线") if no_plan
+            no_plan_detail if no_plan
             else "行情更新失败，已使用本地市场快照"
             if summary.get("market_source") == "fallback_cache"
             else "本方案使用蜜瓜转接行情" if summary.get("market_source") in {"mirror", "mirror_fallback"}
@@ -2396,6 +2422,8 @@ class TradePage(QWidget):
         message = failure.text if failure else "任务执行中断。"
         self.stage_detail.setText(message)
         self.reason_label.setText(message)
+        if self._active_mode == "run":
+            self._render_rubbish_recycling(freight_rubbish_recycling_result({}, self._progress.summary))
         self.set_busy(False)
         self._active_mode = ""
         self._last_result = dict(payload)
@@ -2648,6 +2676,7 @@ class TradePage(QWidget):
         self._update_market_notice(summary)
         self.passenger_summary_label.setText(freight_passenger_summary_text(summary.get("passenger")))
         self.passenger_summary_label.setVisible(bool(self.passenger_summary_label.text()))
+        self._render_rubbish_recycling(summary)
         self._render_overview(summary, route=self._progress.route)
         stop_text = self._planning_stop_text(summary)
         if stop_text:
@@ -2655,6 +2684,8 @@ class TradePage(QWidget):
 
     @staticmethod
     def _planning_stop_text(summary: Mapping[str, Any]) -> str:
+        if summary.get("planning_status") == RUBBISH_RECYCLING_UNREACHABLE:
+            return RUBBISH_RECYCLING_UNREACHABLE_MESSAGE
         arrivals = summary.get("arrival_requirements") or {}
         if arrivals.get("message"):
             return str(arrivals["message"])
@@ -2674,6 +2705,7 @@ class TradePage(QWidget):
         self._update_market_notice(summary)
         self.passenger_summary_label.setText(freight_passenger_summary_text(summary.get("passenger")))
         self.passenger_summary_label.setVisible(bool(self.passenger_summary_label.text()))
+        self._render_rubbish_recycling(summary)
         status = str(summary.get("status") or "")
         self.result_values["status"].setText(self._status_label(status))
         self.result_values["status"].setProperty(
@@ -2682,7 +2714,7 @@ class TradePage(QWidget):
         )
         self._render_overview(summary, route=summary.get("route") or [])
         messages = []
-        if summary.get("reason"):
+        if summary.get("reason") and summary.get("planning_status") != RUBBISH_RECYCLING_UNREACHABLE:
             messages.append(str(summary["reason"]))
         error = summary.get("error")
         if isinstance(error, Mapping):
@@ -2705,9 +2737,22 @@ class TradePage(QWidget):
         self.result_values["status"].style().unpolish(self.result_values["status"])
         self.result_values["status"].style().polish(self.result_values["status"])
 
+    def _render_rubbish_recycling(self, summary: Mapping[str, Any]) -> None:
+        text = freight_rubbish_recycling_text(summary)
+        self.rubbish_recycling_summary_label.setText(text)
+        self.rubbish_recycling_summary_label.setVisible(bool(text))
+
     def _render_overview(self, summary: Mapping[str, Any], *, route: list[dict[str, Any]]) -> None:
         self.result_values["trade_mode"].setText({"free": "不定线路", "fixed": "固定线路"}.get(str(summary.get("trade_mode")), "--"))
-        self.result_values["planning_status"].setText({"ok": "可执行", "no_plan": "无可行方案", "target_unreachable": "目标不可达", "fixed_route_infeasible": "固定线路不可行", "arrival_requirements_unmet": "指定到达次数无法满足"}.get(str(summary.get("planning_status")), str(summary.get("planning_status") or "--")))
+        planning_status = str(summary.get("planning_status") or "--")
+        self.result_values["planning_status"].setText({
+            "ok": "可执行",
+            "no_plan": "无可行方案",
+            "target_unreachable": "目标不可达",
+            "fixed_route_infeasible": "固定线路不可行",
+            "arrival_requirements_unmet": "指定到达次数无法满足",
+            RUBBISH_RECYCLING_UNREACHABLE: "无法安排垃圾回收",
+        }.get(planning_status, planning_status))
         reposition = summary.get("reposition")
         self.result_values["reposition_fatigue"].setText(self._display(reposition.get("expected_fatigue") if isinstance(reposition, Mapping) else summary.get("reposition_expected_fatigue")))
         for field in ("actual_profit", "actual_fatigue"):
@@ -2741,6 +2786,8 @@ class TradePage(QWidget):
         self.reason_label.clear()
         self.passenger_summary_label.clear()
         self.passenger_summary_label.hide()
+        self.rubbish_recycling_summary_label.clear()
+        self.rubbish_recycling_summary_label.hide()
         self.result_captions["average_book_profit"].hide()
         self.result_values["average_book_profit"].hide()
 

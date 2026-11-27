@@ -571,6 +571,7 @@ def reduce_workflow_freight_progress(
         state.resources.update(copy.deepcopy(dict(data["resources"])))
     if isinstance(data.get("passenger"), Mapping):
         state.summary["passenger"] = copy.deepcopy(dict(data["passenger"]))
+    _record_rubbish_recycling_progress(state.summary, stage, event_state, data)
     if stage == "passenger_planning":
         if event_state in {"blocked", "failed", "error", "timeout", "cancelled", "stopping", "stopped",
                            "waiting_confirmation", "awaiting_confirmation"}:
@@ -988,6 +989,7 @@ def reduce_trade_progress(
         next_state.summary = dict(data["summary"])
     if isinstance(data.get("passenger"), Mapping):
         next_state.summary["passenger"] = copy.deepcopy(dict(data["passenger"]))
+    _record_rubbish_recycling_progress(next_state.summary, next_state.stage, next_state.state, data)
     return next_state
 
 
@@ -1217,6 +1219,7 @@ def trade_result_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
         "full_raise_count": result.get("full_raise_count"),
         "fatigue_medicine_used": list(result.get("fatigue_medicine_used") or []),
         "fatigue_medicine_use_count": result.get("fatigue_medicine_use_count"),
+        "rubbish_recycling_status": execution.get("rubbish_recycling_status"),
         "trade_goods_investment": result.get(
             "trade_goods_investment", execution.get("trade_goods_investment")
         ),
@@ -1238,11 +1241,48 @@ def trade_result_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
             "reposition", "reposition_route", "reposition_expected_fatigue", "reposition_expected_fatigue_exact",
             "route_expected_fatigue", "route_expected_fatigue_exact", "actual_profit", "actual_profit_exact",
             "actual_fatigue", "actual_fatigue_used", "target_profit", "target_reached", "target_gap",
-            "maximum_reachable_profit", "arrival_requirements", "completed_circuits", "partial_circuit_legs",
+            "maximum_reachable_profit", "arrival_requirements", "rubbish_recycling_plan",
+            "completed_circuits", "partial_circuit_legs",
             "partial_circuit_city_path_ids", "termination_route_position", "termination_city_id", "stop_reason",
             "execution", "final_sale", "blocked_leg", "sparkling_water_plan", "sparkling_water", "bento_consumption",
         )},
     }
+
+
+def _record_rubbish_recycling_progress(
+    summary: dict[str, Any], stage: str, state: str, data: Mapping[str, Any],
+) -> None:
+    if stage != "rubbish_recycling" or isinstance(data.get("operation"), Mapping):
+        return
+    outcome = data.get("rubbish_recycling")
+    if isinstance(outcome, Mapping) and outcome.get("status") in ("sold", "empty"):
+        summary["rubbish_recycling_status"] = outcome["status"]
+    elif state in {"blocked", "failed", "error", "timeout", "cancelled"}:
+        summary["rubbish_recycling_status"] = "not_triggered"
+
+
+def freight_rubbish_recycling_result(
+    result: Mapping[str, Any], progress: Mapping[str, Any],
+) -> dict[str, Any]:
+    plan = result.get("rubbish_recycling_plan") or progress.get("rubbish_recycling_plan")
+    if not isinstance(plan, Mapping):
+        return {}
+    status = result.get("rubbish_recycling_status")
+    if status not in ("sold", "empty"):
+        status = progress.get("rubbish_recycling_status") or "not_triggered"
+    return {"rubbish_recycling_plan": plan, "rubbish_recycling_status": status}
+
+
+def freight_rubbish_recycling_text(summary: Mapping[str, Any]) -> str:
+    plan = summary.get("rubbish_recycling_plan")
+    if not isinstance(plan, Mapping) or not plan.get("city_name"):
+        return ""
+    city = plan["city_name"]
+    status = summary.get("rubbish_recycling_status")
+    if not status:
+        return f"计划回收站 · {city}"
+    label = {"sold": "已回收", "empty": "站内无垃圾"}.get(status, "未完成")
+    return f"垃圾回收 · {label}（{city}）"
 
 
 def market_fallback_notice(values: Mapping[str, Any]) -> str:
