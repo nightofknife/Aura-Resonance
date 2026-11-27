@@ -20,7 +20,7 @@ from .logic import (
 )
 from .black_moon_catalog import normalize_black_moon_settings
 from .affix_catalog import normalize_affix_inputs
-from .battle_plan import normalize_battle_editor_inputs
+from .battle_plan import default_battle_editor_inputs, normalize_battle_editor_inputs
 from packages.resonance_shared.passenger_parameters import DEFAULT_PASSENGER_OPTIONS, normalize_passenger_options
 from packages.resonance_shared.freight_parameters import (
     DEFAULT_RECOVERY_THRESHOLDS, FREIGHT_RECOVERY_THRESHOLD_KEYS, normalize_fatigue_medicine_limits,
@@ -493,7 +493,9 @@ class ResonanceConfigRepository:
         self.settings.sync()
 
     def load_battle_inputs(self) -> dict[str, Any]:
-        raw = self.settings.value("battle/inputs_json", "")
+        raw = self.settings.value("battle/inputs_json")
+        if raw is None:
+            return default_battle_editor_inputs()
         if raw:
             try:
                 parsed = json.loads(str(raw))

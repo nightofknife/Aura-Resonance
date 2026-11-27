@@ -18,6 +18,7 @@ def page(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(battle_page, "battle_game_day", lambda: ("2026-10-29", "thu"))
     settings = ResonanceConfigRepository(QSettings(str(tmp_path / "battle.ini"), QSettings.IniFormat))
+    settings.save_battle_inputs({})
     widget = battle_page.BattlePage(settings)
     yield widget
     widget.close()
@@ -28,7 +29,7 @@ def day(page, key):
     return page.collect_inputs()["weekly_plan"]["days"][key]
 
 
-def test_default_today_and_empty_week_are_valid(page):
+def test_default_today_and_saved_empty_week_are_valid(page):
     assert page._weekday == "thu"
     assert page.weekday_buttons["thu"].isChecked()
     assert "今日" in page.weekday_buttons["thu"].text()
