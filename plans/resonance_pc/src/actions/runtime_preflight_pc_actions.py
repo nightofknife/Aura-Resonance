@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
+from packages.aura_core.scheduler.operation_scope import OperationScope, OperationTimeout, current_operation_scope
 from ....aura_base.src.platform.contracts import TargetRuntimeError
 
-from ._depart_button_vision import DepartButtonError, probe_depart_button
+from ._depart_button_vision import POLL_INTERVAL, DepartButtonError, probe_depart_button
 
 
 _REQUIRED_CLIENT_SIZE: Tuple[int, int] = (1280, 720)
+_TRADE_START_TIMEOUT_SEC = 5.0
+_TRADE_START_STABLE_SEC = 2.0
+_RETRYABLE_DEPART_PROBE_ERRORS = {
+    "depart_capture_failed",
+    "depart_template_match_failed",
+    "bridge_capture_timeout",
+    "windows_capture_frame_timeout",
+    "windows_capture_frame_unavailable",
+}
 
 
 class PcClientResolutionError(RuntimeError):
@@ -133,7 +144,7 @@ def resonance_pc_require_client_resolution(app: Any = None) -> Dict[str, Any]:
     name="resonance_pc.require_trade_start_screen",
     public=True,
     read_only=True,
-    description="Require the standard departure button on the city main screen before starting freight.",
+    description="Wait up to five seconds for two seconds of stable departure-button recognition before freight.",
 )
 @requires_services(app="plans/aura_base/app", vision="plans/aura_base/vision")
 def resonance_pc_require_trade_start_screen(app: Any = None, vision: Any = None) -> Dict[str, Any]:
@@ -141,24 +152,53 @@ def resonance_pc_require_trade_start_screen(app: Any = None, vision: Any = None)
         if is_current_task_cancel_requested():
             raise asyncio.CancelledError("Trade start screen check cancelled")
 
-    match = probe_depart_button(app=app, vision=vision, check_cancelled=check_cancelled,
-                                diagnose_oversized=True)
-    if match["found"]:
-        return {"ok": True, "page_state": "city_main", "match": match}
+    scope = OperationScope(_TRADE_START_TIMEOUT_SEC, parent=current_operation_scope(),
+                           target=getattr(app, "target_runtime", None), cancel_check=check_cancelled,
+                           monotonic=time.monotonic)
+    match = {}
+    stable_since = None
+    probe_error = None
+    try:
+        with scope.activate():
+            while True:
+                try:
+                    match = probe_depart_button(app=app, vision=vision, check_cancelled=scope.checkpoint,
+                                                diagnose_oversized=True)
+                    probe_error = None
+                except (DepartButtonError, TargetRuntimeError) as exc:
+                    if exc.code not in _RETRYABLE_DEPART_PROBE_ERRORS:
+                        raise
+                    probe_error = exc.code
 
-    oversized = match["oversized_match"]
-    logger.warning("[TradeStartScreen] standard_score=%.4f oversized_score=%.4f oversized=%s",
-                   match["confidence"], oversized["confidence"], oversized["found"])
-    if oversized["found"]:
+                observed_at = time.monotonic()
+                scope.checkpoint()
+                if probe_error is None and match["found"]:
+                    if stable_since is None:
+                        stable_since = observed_at
+                    if observed_at - stable_since >= _TRADE_START_STABLE_SEC:
+                        return {"ok": True, "page_state": "city_main", "match": match}
+                else:
+                    stable_since = None
+                scope.sleep(POLL_INTERVAL)
+    except OperationTimeout:
+        scope.check_cancelled()
+
+    oversized = match.get("oversized_match", {})
+    detail = {**match, "timeout_sec": _TRADE_START_TIMEOUT_SEC, "required_stable_sec": _TRADE_START_STABLE_SEC}
+    if probe_error is not None:
+        detail["probe_error"] = probe_error
+    logger.warning("[TradeStartScreen] timeout standard_score=%s oversized_score=%s probe_error=%s",
+                   match.get("confidence"), oversized.get("confidence"), probe_error)
+    if probe_error is None and oversized.get("found"):
         raise DepartButtonError(
             "trade_start_hud_oversized",
             "窗口已是 1280×720，但「启程」按钮仍偏大。请完全退出游戏，以 1280×720 窗口模式重新进入站场后再启动跑商。",
-            match,
+            detail,
         )
     raise DepartButtonError(
         "trade_start_screen_unconfirmed",
-        "未识别到站场主界面右下角的「启程」按钮。请返回可见「启程」的站场主界面后再启动跑商。",
-        match,
+        "5 秒内未能连续 2 秒确认右下角的「启程」按钮。请等待站场主界面加载完成后再启动跑商。",
+        detail,
     )
 
 
