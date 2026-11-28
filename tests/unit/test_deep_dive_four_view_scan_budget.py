@@ -1,6 +1,5 @@
 """Four-view route protection and public task forwarding; no game resources."""
 import asyncio
-from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,26 +73,34 @@ class WindowSizeOnly:
 
 @pytest.mark.parametrize('route,expected', [('cells', 90.), ('four_views', 300.)])
 def test_initialize_persists_normalized_route_and_budget(tmp_path, monkeypatch, route, expected):
-    saved = []
-    async def capture(*_args):
-        return None, dict(valid=True, scene='board', player_turn=True)
-    async def normalize(_app, command):
-        assert command == 'normalize'
+    saved = {}
+    bridge_calls = []
+
+    def read_screen(*_args):
+        bridge_calls.append('read_screen')
+        return dict(kind='none', status='absent', scene='board', player_turn=True)
+
+    def execute(command, **_kwargs):
+        bridge_calls.append(command)
         return 'ready'
-    async def save(state, *_args):
-        saved.append(deepcopy(state))
+
+    async def capture_evidence():
+        return SimpleNamespace(success=False)
+
+    async def save(key, state):
+        saved[key] = state
+
+    bridge = SimpleNamespace(read_deep_dive_screen=read_screen, execute_deep_dive_action=execute)
+    app = SimpleNamespace(controller=SimpleNamespace(bridge=bridge), capture_async=capture_evidence)
     monkeypatch.setattr(flow, 'resolve_base_path', lambda: tmp_path)
-    monkeypatch.setattr(flow, '_capture', capture)
-    monkeypatch.setattr(flow, '_execute_native_action', normalize)
-    monkeypatch.setattr(flow, '_save', save)
-    monkeypatch.setattr(flow, '_terminal', lambda *_args: False)
-    monkeypatch.setattr(flow, '_cancel_check', lambda: None)
-    monkeypatch.setattr(flow.asyncio, 'sleep', _nothing)
     outcome = asyncio.run(flow.initialize_deep_dive_planned_run(scan_route=route,
-        app=WindowSizeOnly(), state_store=object()))
+        app=app, state_store=SimpleNamespace(set=save)))
     assert outcome['status'] == 'running'
-    assert saved[-1]['scan_route'] == route and saved[-1]['scan_time_budget_sec'] == expected
-    assert saved[-1]['post_scan_recognition_elapsed_sec'] == 0.
+    assert bridge_calls == ['read_screen', 'normalize']
+    state = saved[outcome['session_key']]
+    assert state['observation_backend'] == 'bridge'
+    assert state['scan_route'] == route and state['scan_time_budget_sec'] == expected
+    assert state['post_scan_recognition_elapsed_sec'] == 0.
 
 
 @pytest.mark.parametrize('route', ['cells', 'four_views'])
@@ -150,7 +157,7 @@ def test_scan_turn_uses_native_board_with_legacy_route_settings(tmp_path, monkey
 
 
 @pytest.mark.parametrize('route,captures', [('cells', 0), ('four_views', 1)])
-def test_post_scan_stage_remains_available_after_long_four_view_scan(monkeypatch, route, captures):
+def test_retained_visual_post_scan_stage_honors_its_budget(monkeypatch, route, captures):
     seen = []
     state = dict(status='running', phase='reset_wide', phase_started=flow.time.monotonic(),
                  terminal_reached=False, recognition_elapsed_sec=102.6,
@@ -170,10 +177,31 @@ def test_post_scan_stage_remains_available_after_long_four_view_scan(monkeypatch
     monkeypatch.setattr(flow, '_stop', lambda state, reason, *_args, **_kw:
                         state.update(status='blocked', reason=reason))
     monkeypatch.setattr(flow.asyncio, 'sleep', _nothing)
-    asyncio.run(flow.advance_deep_dive_planned_run('fixture', app=WindowSizeOnly()))
+    asyncio.run(flow._advance_deep_dive_planned_run_visual('fixture', app=WindowSizeOnly()))
     assert len(seen) == captures
     assert state['post_scan_recognition_elapsed_sec'] >= 0
     if route == 'cells':
         assert state['reason'] == 'recognition_time_budget_exhausted'
     else:
         assert state['status'] == 'running'
+
+
+def test_native_advance_requires_restart_for_saved_visual_session(monkeypatch):
+    state = dict(status='running', phase='reset_wide', terminal_reached=False)
+
+    async def load(*_args):
+        return state
+
+    async def unexpected_capture(*_args):
+        pytest.fail('The native entrypoint should not resume the visual scan')
+
+    monkeypatch.setattr(flow, '_load', load)
+    monkeypatch.setattr(flow, '_capture', unexpected_capture)
+    monkeypatch.setattr(flow, '_capture_run_evidence', _nothing)
+    monkeypatch.setattr(flow, '_save', _nothing)
+    monkeypatch.setattr(flow, '_release_owned_input', _nothing)
+    monkeypatch.setattr(flow, '_report', lambda *_args: None)
+    outcome = asyncio.run(flow.advance_deep_dive_planned_run('fixture', app=object()))
+
+    assert outcome['status'] == 'blocked'
+    assert outcome['reason'] == 'visual_session_restart_required'

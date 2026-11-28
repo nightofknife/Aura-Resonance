@@ -134,31 +134,41 @@ def test_card_pack_needs_both_swipe_prompt_and_logo(anchor):
 
 def test_card_pack_ends_cleanup_and_unlimited_loop_without_clicking(tmp_path, monkeypatch):
     screenshot = card_pack_frame('card_pack_swipe_prompt', 'card_pack_deep_dive_logo')
-    app = SimpleNamespace(capture=lambda: SimpleNamespace(success=True, image=screenshot))
-    clicks = []
+    inputs = []
+    captures = []
+    bridge = SimpleNamespace(
+        read_deep_dive_screen=lambda: dict(kind='cleanup', page='card_pack', status='waiting',
+                                          scene='unknown', player_turn=False),
+        execute_deep_dive_choice=inputs.append,
+    )
+
+    def capture():
+        captures.append(True)
+        return SimpleNamespace(success=True, image=screenshot)
+
+    app = SimpleNamespace(controller=SimpleNamespace(bridge=bridge), capture=capture)
 
     async def pause(_):
         pass
 
     monkeypatch.setattr(cleanup, 'resolve_base_path', lambda: tmp_path)
-    monkeypatch.setattr(cleanup, 'aura_click', lambda **kwargs: clicks.append(kwargs))
+    monkeypatch.setattr(cleanup, 'aura_click', lambda **kwargs: inputs.append(kwargs))
     monkeypatch.setattr(cleanup.asyncio, 'sleep', pause)
 
     async def run():
         store = Store()
         key = (await cleanup.initialize_cleanup(state_store=store))['session_key']
-        state = await store.get(key)
-        state['pending'] = {'scene': 'settlement_details', 'at': state['progress_at'], 'clicks': 1}
-        await store.set(key, state)
         first = await cleanup.advance_cleanup(key, app, store)
         assert first == {'status': 'running', 'scene': 'card_pack', 'action': 'wait'}
+        assert not captures
         second = await cleanup.advance_cleanup(key, app, store)
         assert second == {'status': 'blocked', 'scene': 'card_pack', 'action': 'blocked'}
         result = await cleanup.finish_cleanup(key, store)
         assert not result['success']
         assert result['reason_code'] == 'deep_dive_card_pack_requires_manual_open'
         assert Path(result['last_frame']).is_file()
-        assert not clicks
+        assert len(captures) == 1
+        assert not inputs
 
         await store.set('test', dict(seed(0), stage='cleanup', run_index=1))
         child_result = {'session_key': key, 'deep_dive_cleanup': result}
@@ -317,8 +327,28 @@ def test_entry_returns_to_depth_selector_if_start_reopens_formation(monkeypatch)
 @pytest.mark.parametrize('key,stable_scans',[('board_ready',3),('reward_marker',2)])
 def test_boon_confirmation_recognizes_both_entry_destinations(monkeypatch, key, stable_scans):
     seen = []
+    transitions = []
+    submitted = []
+    reward = dict(kind='item_feedback', status='ready', revision=7, subject_id=11400607,
+                  rows=[dict(action='dismiss', disabled=False, index=1, id=11400607)])
+    reward_reads = 0
+
+    def read_choice():
+        nonlocal reward_reads
+        if reward_reads < 2:
+            reward_reads += 1
+            return reward
+        return dict(kind='none', status='absent')
+
+    def execute_choice(target):
+        submitted.append(target)
+        return 'submitted'
+
+    bridge = SimpleNamespace(read_deep_dive_choice=read_choice, execute_deep_dive_choice=execute_choice)
+    app = SimpleNamespace(controller=SimpleNamespace(bridge=bridge))
 
     async def find(target, **_):
+        assert transitions == [{'step': 'dismiss_reward', 'reward_id': 11400607}]
         if target.key == key:
             seen.append(target.key)
         return SimpleNamespace(found=target.key == key, center_point=(100, 200))
@@ -328,9 +358,13 @@ def test_boon_confirmation_recognizes_both_entry_destinations(monkeypatch, key, 
 
     monkeypatch.setattr(entry, '_find_target', find)
     monkeypatch.setattr(entry, 'aura_sleep', pause)
-    target, match = asyncio.run(entry._wait_for_boon_destination(app=None, vision=None, engine=None))
+    target, match = asyncio.run(entry._wait_for_boon_destination(
+        app=app, vision=None, engine=None, transitions=transitions,
+    ))
     assert target.key == key and match.found
     assert len(seen) == stable_scans
+    assert submitted == [dict(kind='item_feedback', revision=7, subject_id=11400607,
+                              index=1, id=11400607, command='confirm')]
 
 
 def test_defeat_advances_to_the_run_settlement_once():
