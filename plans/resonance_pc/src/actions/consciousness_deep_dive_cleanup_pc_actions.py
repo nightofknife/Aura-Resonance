@@ -2,7 +2,6 @@
 import asyncio
 import copy
 import time
-from pathlib import Path
 from uuid import uuid4
 
 import cv2
@@ -12,9 +11,15 @@ from packages.aura_core.scheduler.cancellation import is_current_task_cancel_req
 from packages.aura_core.scheduler.utils import resolve_base_path
 from packages.aura_core.utils.exceptions import StopTaskException
 from ....aura_base.src.actions.input_actions import click as aura_click
+from ....aura_base.src.platform.contracts import TargetRuntimeError
 from ._deep_dive_cleanup_vision import observe
 
 SCHEMA='resonance_pc.deep_dive_cleanup.v1'
+SETTLEMENT_CONTROLS = {
+    'settlement_summary': 'continue',
+    'settlement_details': 'confirm',
+    'settlement_reward': 'dismiss',
+}
 
 
 def cancel_check():
@@ -80,10 +85,7 @@ async def initialize_cleanup(state_store=None):
     return {'session_key':key,'status':'running'}
 
 
-@action_info(name='resonance_pc.deep_dive_cleanup_advance',public=True,read_only=False,
-             description='Observe and perform at most one verified settlement cleanup click.')
-@requires_services(app='plans/aura_base/app',state_store='core/state_store')
-async def advance_cleanup(session_key:str,app=None,state_store=None):
+async def _advance_cleanup_visual(session_key:str,app=None,state_store=None):
     cancel_check()
     state=await state_store.get(session_key)
     if not isinstance(state,dict) or state.get('schema')!=SCHEMA or state.get('session_key')!=session_key:
@@ -110,6 +112,93 @@ async def advance_cleanup(session_key:str,app=None,state_store=None):
     await state_store.set(session_key,copy.deepcopy(state))
     if state['status']=='running':await asyncio.sleep(.35)
     return {'status':state['status'],'scene':o['scene'],'action':action}
+
+
+async def _step_native_cleanup(state, bridge, snapshot, now):
+    kind, status, scene = snapshot['kind'], snapshot['status'], snapshot.get('page')
+    activity_home = kind == 'opening' and scene == 'activity_home' and status == 'ready'
+    card_pack = kind == 'cleanup' and scene == 'card_pack' and status == 'waiting'
+    settlement = kind == 'cleanup' and scene in SETTLEMENT_CONTROLS and status in {'ready', 'submitted'}
+    if not (activity_home or card_pack or settlement):
+        scene = 'unknown'
+    signature = [scene, snapshot.get('revision')]
+    if scene == 'unknown':
+        state['stable'] = 0
+    elif signature == state.get('native_signature'):
+        state['stable'] += 1
+    else:
+        state.update(native_signature=signature, stable=1)
+
+    if state['stable'] >= 2:
+        if scene == 'card_pack':
+            state.update(status='blocked', page_state='deep_dive_card_pack',
+                         reason='识海深潜卡包需要手动滑动开启，任务已停止。',
+                         reason_code='deep_dive_card_pack_requires_manual_open')
+            state['trace'].append({'blocked': scene, 'at': now})
+            return scene, 'blocked'
+        if scene == 'activity_home':
+            state.update(status='completed', page_state='deep_dive_activity_home')
+            state['trace'].append({'confirmed': scene, 'at': now})
+            return scene, 'completed'
+    if now - state['progress_at'] >= 30:
+        state.update(status='blocked', reason='收尾页面30秒未得到可确认的进展')
+        return scene, 'blocked'
+    if state['stable'] < 2 or status != 'ready':
+        return scene, 'wait'
+
+    rows = [row for row in snapshot['rows']
+            if not row['disabled'] and row.get('action') == SETTLEMENT_CONTROLS[scene]]
+    if len(rows) != 1:
+        return scene, 'wait'
+    row = rows[0]
+    target = dict(command='confirm', kind=kind, revision=snapshot['revision'],
+                  subject_id=snapshot['subject_id'], index=row['index'], id=row['id'])
+    cancel_check()
+    applied = await tracked_to_thread(bridge.execute_deep_dive_choice, target)
+    cancel_check()
+    if applied == 'submitted':
+        state.update(stable=0, progress_at=now)
+        state['trace'].append({'submitted': scene, 'at': now})
+        return scene, 'confirm'
+    return scene, 'wait'
+
+
+@action_info(name='resonance_pc.deep_dive_cleanup_advance', public=True, read_only=False,
+             description='Advance settlement cleanup through confirmed native panels.')
+@requires_services(app='plans/aura_base/app', state_store='core/state_store')
+async def advance_cleanup(session_key: str, app=None, state_store=None):
+    cancel_check()
+    state = await state_store.get(session_key)
+    if not isinstance(state, dict) or state.get('schema') != SCHEMA or state.get('session_key') != session_key:
+        raise RuntimeError('收尾会话不存在')
+    if state['status'] != 'running':
+        return {'status': state['status']}
+
+    bridge = app.controller.bridge
+    scene = 'unknown'
+    try:
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_screen)
+        scene, action = await _step_native_cleanup(state, bridge, snapshot, time.time())
+    except TargetRuntimeError as exc:
+        state.update(status='blocked', reason=str(exc), reason_code=exc.code)
+        action = 'blocked'
+
+    if state['status'] in {'completed', 'blocked'}:
+        # A screenshot is optional evidence after the native flow has ended.
+        try:
+            capture = await tracked_to_thread(app.capture)
+            if capture.success and capture.image is not None:
+                folder = resolve_base_path() / 'logs/deep_dive_cleanup' / session_key.split(':')[-1]
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / (state['status'] + '.png')
+                if cv2.imwrite(str(path), cv2.cvtColor(capture.image, cv2.COLOR_RGB2BGR)):
+                    state['last_frame'] = str(path)
+        except (TargetRuntimeError, OSError, cv2.error):
+            pass
+    await state_store.set(session_key, copy.deepcopy(state))
+    if state['status'] == 'running':
+        await asyncio.sleep(.35)
+    return {'status': state['status'], 'scene': scene, 'action': action}
 
 
 @action_info(name='resonance_pc.deep_dive_cleanup_finish',public=True,read_only=True,

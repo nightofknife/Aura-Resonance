@@ -12,11 +12,11 @@ from packages.aura_core.utils.exceptions import StopTaskException
 from packages.resonance_shared.deep_dive_interval import normalize_interval_policy
 from packages.resonance_shared.deep_dive_shop import normalize_shop_policy
 from packages.resonance_shared.deep_dive_event_options import normalize_event_option_policy
-from ._deep_dive_cleanup_vision import observe
 from ._deep_dive_opening_options import DEFAULT_DIVE_DEPTH, DEFAULT_OPENING_STRATEGY, validate_opening_options
 
 SCHEMA='resonance_pc.deep_dive_loop.v1'
 PROGRESS='task.resonance_pc_deep_dive_loop_progress'
+_NODE_EVENT_RESTART_REASON = 'node_event_missing_rotation_exhausted'
 _SHORTAGE_SETTLEMENT_REASONS = {
     'formation_shortage_settled', 'interval_shortage_settled',
     'fixed_party_unrecoverable_settled', 'insufficient_battle_roles_settled',
@@ -47,7 +47,10 @@ def successful(stage,payload):
 
 
 def _counts_towards_target(result, count_failed_runs):
-    if result.get('reason') in _SHORTAGE_SETTLEMENT_REASONS:
+    reason = result.get('reason')
+    if reason == _NODE_EVENT_RESTART_REASON:
+        return False
+    if reason in _SHORTAGE_SETTLEMENT_REASONS:
         return count_failed_runs
     game_success = result.get('game_success')
     return game_success is True or (count_failed_runs and game_success is False)
@@ -78,6 +81,24 @@ async def load(key,store):
     return s
 
 
+async def _validate_visual_home(app, state):
+    from ._deep_dive_cleanup_vision import observe
+
+    for _ in range(2):
+        cancel_check()
+        capture = await tracked_to_thread(app.capture)
+        image = capture.image if getattr(capture, 'success', False) else None
+        if image is None or observe(image)['scene'] != 'activity_home':
+            state.update(status='blocked', reason='完整循环必须从识海深潜活动首页启动')
+            if image is not None:
+                path = resolve_base_path() / 'logs/deep_dive_loop' / state['session_key'].split(':')[-1] / 'start_blocked.png'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
+                    state['last_frame'] = str(path)
+            return
+        await asyncio.sleep(.35)
+
+
 @action_info(name='resonance_pc.deep_dive_loop_initialize',public=True,read_only=False,
              description='Validate loop options and activity-home start without clicking.')
 @requires_services(app='plans/aura_base/app',state_store='core/state_store',event_bus='core/event_bus')
@@ -106,16 +127,13 @@ async def initialize_loop(
         'event_option_policy': normalize_event_option_policy(event_option_policy),
         'battle_retry_limit': battle_retry_limit,
     }
-    image=None
+    bridge = app.controller.bridge
     for _ in range(2):
-        cancel_check();capture=await tracked_to_thread(app.capture)
-        image=capture.image if getattr(capture,'success',False) else None
-        if image is None or observe(image)['scene']!='activity_home':
+        cancel_check()
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_screen)
+        if (snapshot.get('kind') != 'opening' or snapshot.get('page') != 'activity_home'
+                or snapshot.get('status') != 'ready'):
             s.update(status='blocked',reason='完整循环必须从识海深潜活动首页启动')
-            if image is not None:
-                path=resolve_base_path()/'logs/deep_dive_loop'/key.split(':')[-1]/'start_blocked.png'
-                path.parent.mkdir(parents=True,exist_ok=True)
-                if cv2.imwrite(str(path),cv2.cvtColor(image,cv2.COLOR_RGB2BGR)):s['last_frame']=str(path)
             break
         await asyncio.sleep(.35)
     await save(s,state_store,event_bus)
@@ -144,8 +162,15 @@ async def checkpoint_loop(session_key:str,stage:str,child_result:dict,state_stor
     phase_titles = {'entry': '开局', 'single': '关卡内运行', 'cleanup': '结算收尾'}
     if stage not in phase_titles or s['status']!='running' or s['stage']!=stage:raise RuntimeError('循环阶段顺序不符')
     result=child_output(stage,child_result)
-    if not successful(stage,result):
-        result = result if isinstance(result, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    restart_settled = (
+        stage == 'single'
+        and result.get('status') == 'restart_required'
+        and result.get('reason') == _NODE_EVENT_RESTART_REASON
+        and result.get('terminal_reached') is True
+        and result.get('terminal') == 'settlement'
+    )
+    if not (restart_settled or successful(stage, result)):
         reason = result.get('reason') or '子任务未返回已确认的完成结果'
         s.update(
             status='blocked', reason=f"第{s['run_index']}局{phase_titles[stage]}：{reason}",

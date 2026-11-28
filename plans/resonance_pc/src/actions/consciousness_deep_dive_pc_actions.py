@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 from packages.aura_core.api import action_info, requires_services
@@ -19,10 +19,13 @@ from ....aura_base.src.actions.input_actions import click as aura_click
 from ....aura_base.src.actions.input_actions import drag as aura_drag
 from ....aura_base.src.actions.wait_actions import sleep as aura_sleep
 from ....aura_base.src.actions.wait_actions import wait_for_image as aura_wait_for_image
+from ....aura_base.src.platform.contracts import TargetRuntimeError
 from ._deep_dive_choice_target import choice_signature, choice_target, native_key, preferred_card
 from ._deep_dive_native_choices import observe_choice
 from ._deep_dive_opening_options import DIVE_DEPTHS, OPENING_STRATEGIES, validate_opening_options
-from ._deep_dive_opening_vision import OpeningChoice, OpeningFrame
+
+if TYPE_CHECKING:
+    from ._deep_dive_opening_vision import OpeningChoice, OpeningFrame
 
 
 Region = Tuple[int, int, int, int]
@@ -45,6 +48,12 @@ _STABLE_CENTER_TOLERANCE_PX = 2
 _DIFFICULTY_DRAG_START = (500, 360)
 _DIFFICULTY_DRAG_END = (900, 360)
 _REWARD_DISMISS_POINT = (640, 680)
+_NATIVE_STRATEGY_IDS = {
+    "source": 89700006,
+    "waxing_waning": 89700001,
+    "revival": 89700002,
+    "defense": 89700003,
+}
 
 
 @dataclass(frozen=True)
@@ -255,6 +264,8 @@ async def _click_until_original_absent(
 
 
 async def _opening_frame(app: Any) -> OpeningFrame | None:
+    from ._deep_dive_opening_vision import OpeningFrame
+
     capture = await app.capture_async()
     if not capture.success or capture.image is None or capture.image.shape != (720, 1280, 3):
         return None
@@ -390,56 +401,43 @@ async def _save_opening_failure(app: Any) -> str:
     return ""
 
 
-async def _run_transition(
-    step: str,
-    control: _TemplateTarget,
-    next_state: _TemplateTarget,
+async def _dismiss_visual_opening_reward(
     *,
     app: Any,
     vision: Any,
     engine: ExecutionEngine,
-    fixed_click_point: Optional[Point] = None,
-    next_timeout_sec: float = _NEXT_STATE_TIMEOUT_SEC,
-    next_stable_scans: int = 2,
-    next_error_code: Optional[str] = None,
-) -> Dict[str, Any]:
+    transitions: list[Dict[str, Any]],
+) -> None:
     started_at = time.monotonic()
     click_result = await _click_until_original_absent(
-        control,
+        _REWARD_MARKER,
         app=app,
         vision=vision,
         engine=engine,
-        fixed_click_point=fixed_click_point,
+        fixed_click_point=_REWARD_DISMISS_POINT,
     )
-    next_match = await _wait_for_target(
-        next_state,
+    result = {"step": "dismiss_reward", **click_result}
+    transitions.append(result)
+    next_state, next_match = await _wait_for_boon_destination(
         app=app,
         vision=vision,
         engine=engine,
-        timeout_sec=next_timeout_sec,
-        stable_scans=next_stable_scans,
-        error_code=next_error_code or (
-            "deep_dive_board_not_ready" if next_state.key == _BOARD_READY.key else "deep_dive_next_state_timeout"
-        ),
+        transitions=transitions,
+        check_reward_marker=False,
     )
-    result = {
-        "step": step,
-        **click_result,
-        "next_state": _match_payload(next_match, next_state),
-        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
-    }
+    result["next_state"] = _match_payload(next_match, next_state)
+    result["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
     logger.info(
         "[DeepDiveEntry] transition=%s control=%s next_state=%s attempts=%s elapsed_ms=%s",
-        step,
-        control.key,
+        result["step"],
+        _REWARD_MARKER.key,
         next_state.key,
         result["click_attempts"],
         result["elapsed_ms"],
     )
-    return result
 
 
-async def _submit_opening_boon(bridge) -> dict[str, Any]:
+async def _submit_opening_boon(bridge, transitions=None) -> dict[str, Any]:
     deadline = time.monotonic() + _NEXT_STATE_TIMEOUT_SEC
     previous = None
     selection = None
@@ -448,7 +446,9 @@ async def _submit_opening_boon(bridge) -> dict[str, Any]:
         _check_cancelled()
         snapshot = await tracked_to_thread(bridge.read_deep_dive_choice)
         _check_cancelled()
-        if snapshot.get("kind") == "cards" and snapshot.get("status") == "ready":
+        if transitions is not None and snapshot.get("kind") == "item_feedback":
+            previous = await _dismiss_opening_reward(bridge, snapshot, previous, transitions)
+        elif snapshot.get("kind") == "cards" and snapshot.get("status") == "ready":
             observation = observe_choice({}, snapshot, None)
             cards = observation["cards"]
             signature = choice_signature(observation)
@@ -482,15 +482,29 @@ async def _submit_opening_boon(bridge) -> dict[str, Any]:
     raise ConsciousnessDeepDiveError("deep_dive_boon_selection_not_confirmed", "未能通过桥接确认开局推力选择。")
 
 
-async def _wait_for_boon_destination(*, app: Any, vision: Any, engine: ExecutionEngine):
+async def _wait_for_boon_destination(
+    *, app: Any, vision: Any, engine: ExecutionEngine, transitions: list[Dict[str, Any]],
+    check_reward_marker: bool = True,
+):
     """After confirming the boon, accept either its announcement or a ready board."""
+    bridge = app.controller.bridge
     deadline = time.monotonic() + _BOARD_READY_TIMEOUT_SEC
+    targets = ((_REWARD_MARKER, 2), (_BOARD_READY, 3)) if check_reward_marker else ((_BOARD_READY, 3),)
+    previous_feedback = None
     previous_target = None
     previous_center = None
     consecutive = 0
     while time.monotonic() < deadline:
         _check_cancelled()
-        for target, required in ((_REWARD_MARKER, 2), (_BOARD_READY, 3)):
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_choice)
+        _check_cancelled()
+        if snapshot.get("kind") == "item_feedback":
+            previous_feedback = await _dismiss_opening_reward(bridge, snapshot, previous_feedback, transitions)
+            previous_target, previous_center, consecutive = None, None, 0
+            await aura_sleep(_POLL_INTERVAL_SEC)
+            continue
+        previous_feedback = None
+        for target, required in targets:
             match = await _find_target(target, app=app, vision=vision, engine=engine)
             center = getattr(match, "center_point", None)
             if not getattr(match, "found", False) or not isinstance(center, (list, tuple)) or len(center) != 2:
@@ -543,7 +557,7 @@ async def resonance_pc_consciousness_deep_dive_enter_stage(
 
     try:
         return await _enter_stage(app, vision, engine, dive_depth, opening_strategy)
-    except ConsciousnessDeepDiveError as exc:
+    except (ConsciousnessDeepDiveError, TargetRuntimeError) as exc:
         logger.warning("[DeepDiveEntry] depth=%s opening_strategy=%s blocked: %s", dive_depth, opening_strategy, exc)
         return {
             "success": False,
@@ -557,6 +571,155 @@ async def resonance_pc_consciousness_deep_dive_enter_stage(
         }
 
 
+def _native_opening_target(snapshot, row):
+    return {
+        "kind": snapshot["kind"],
+        "revision": snapshot["revision"],
+        "subject_id": snapshot["subject_id"],
+        "index": row["index"],
+        "id": row["id"],
+        "command": "confirm",
+    }
+
+
+async def _native_opening_control(
+    bridge, *, page, actions, timeout, error_code, message, row_id=None, returned_from=None,
+):
+    deadline = time.monotonic() + timeout
+    previous = last_submission = None
+    while time.monotonic() < deadline:
+        _check_cancelled()
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_screen)
+        _check_cancelled()
+        current_page = snapshot.get("page")
+        draft = (returned_from is not None and current_page in {"opening_strategy", "opening_formation"}
+                 and current_page.removeprefix("opening_") not in returned_from)
+        row = None
+        if snapshot.get("kind") == "opening" and snapshot.get("status") == "ready":
+            if current_page == page:
+                row = next((item for item in snapshot["rows"] if item["action"] in actions
+                            and (row_id is None or item["id"] == row_id)), None)
+            elif draft:
+                row = next((item for item in snapshot["rows"] if item["action"] == "back"), None)
+        if row is None:
+            previous = None
+            await aura_sleep(_POLL_INTERVAL_SEC)
+            continue
+
+        target = _native_opening_target(snapshot, row)
+        action = row["action"]
+        signature = (current_page, target["revision"], target["subject_id"], target["index"], target["id"], action)
+        if signature == previous and signature != last_submission:
+            if row["disabled"]:
+                if action == "select_depth":
+                    raise ConsciousnessDeepDiveError(
+                        "deep_dive_depth_locked", f"深度{DIVE_DEPTHS[row_id - 1]}尚未解锁。")
+                if action == "select_strategy":
+                    raise ConsciousnessDeepDiveError(error_code, message)
+                if action == "confirm_formation":
+                    raise ConsciousnessDeepDiveError(
+                        "deep_dive_opening_formation_incomplete", "开局编队未满足下潜条件。")
+            else:
+                status = await tracked_to_thread(bridge.execute_deep_dive_choice, target)
+                _check_cancelled()
+                if status in {"applied", "submitted"}:
+                    last_submission = signature
+                    if action == "back":
+                        returned_from.append(current_page.removeprefix("opening_"))
+                    elif action not in {"select_depth", "select_strategy"}:
+                        return
+        previous = signature
+        await aura_sleep(_POLL_INTERVAL_SEC)
+    raise ConsciousnessDeepDiveError(error_code, message, {"page": page, "timeout_sec": timeout})
+
+
+async def _wait_for_native_opening_board(bridge, transitions):
+    deadline = time.monotonic() + _BOARD_READY_TIMEOUT_SEC
+    previous = None
+    while time.monotonic() < deadline:
+        _check_cancelled()
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_screen)
+        _check_cancelled()
+        current = None
+        map_id = snapshot.get("map_id")
+        if (snapshot.get("scene") == "board" and snapshot.get("player_turn")
+                and type(map_id) is int and map_id > 0 and snapshot.get("turn")):
+            current = ("board", map_id)
+            if previous == current:
+                return
+        elif snapshot.get("kind") == "item_feedback":
+            current = await _dismiss_opening_reward(bridge, snapshot, previous, transitions)
+        previous = current
+        await aura_sleep(_POLL_INTERVAL_SEC)
+    raise ConsciousnessDeepDiveError(
+        "deep_dive_board_not_ready", "确认开局推力后，桥接器未能确认玩家棋盘已就绪。")
+
+
+async def _dismiss_opening_reward(bridge, snapshot, previous, transitions):
+    if snapshot.get("status") != "ready":
+        return None
+    dismiss = next((row for row in snapshot["rows"] if row["action"] == "dismiss" and not row["disabled"]), None)
+    if dismiss is None:
+        return None
+    target = _native_opening_target(snapshot, dismiss)
+    signature = native_key(target)
+    if signature == previous:
+        _check_cancelled()
+        status = await tracked_to_thread(bridge.execute_deep_dive_choice, target)
+        _check_cancelled()
+        if status == "submitted":
+            transitions.append({"step": "dismiss_reward", "reward_id": target["id"]})
+            return None
+    return signature
+
+
+async def _enter_stage_native(bridge, dive_depth: int, opening_strategy: str) -> Dict[str, Any]:
+    started_at = time.monotonic()
+    transitions: list[Dict[str, Any]] = []
+    returned_from = []
+    await _native_opening_control(
+        bridge, page="activity_home", actions={"start"}, timeout=_CONTROL_WAIT_TIMEOUT_SEC,
+        error_code="deep_dive_start_dive_not_found", message="桥接器未确认识海深潜首页或开始下潜按钮。",
+    )
+    transitions.append({"step": "start_dive", "returned_from_draft": returned_from})
+    await _native_opening_control(
+        bridge, page="opening_depth", actions={"select_depth", "confirm_depth"}, row_id=dive_depth,
+        timeout=_NEXT_STATE_TIMEOUT_SEC, returned_from=returned_from,
+        error_code="deep_dive_depth_not_confirmed", message=f"未能确认深度{DIVE_DEPTHS[dive_depth - 1]}。",
+    )
+    transitions.append({"step": "start_game", "dive_depth": dive_depth})
+    await _native_opening_control(
+        bridge, page="opening_strategy", actions={"select_strategy", "confirm_strategy"},
+        row_id=_NATIVE_STRATEGY_IDS[opening_strategy], timeout=_NEXT_STATE_TIMEOUT_SEC,
+        error_code="deep_dive_opening_strategy_not_confirmed",
+        message=f"未能确认开局策略{OPENING_STRATEGIES[opening_strategy]}。",
+    )
+    transitions.append({"step": "confirm_strategy", "opening_strategy": opening_strategy})
+    await _native_opening_control(
+        bridge, page="opening_formation", actions={"confirm_formation"}, timeout=_NEXT_STATE_TIMEOUT_SEC,
+        error_code="deep_dive_opening_formation_unconfirmed", message="未能通过桥接确认开局编队。",
+    )
+    transitions.append({"step": "confirm_formation"})
+    boon = await _submit_opening_boon(bridge, transitions)
+    boon_transition = {"step": "confirm_boon", **boon}
+    transitions.append(boon_transition)
+    await _wait_for_native_opening_board(bridge, transitions)
+    next_key = "reward_marker" if transitions[-1] is not boon_transition else "board_ready"
+    boon_transition["next_state"] = {"key": next_key, "source": "bridge", "found": True}
+    return {
+        "success": True,
+        "status": "completed",
+        "stage": "enter_stage",
+        "page_state": "deep_dive_board",
+        "dive_depth": dive_depth,
+        "opening_strategy": opening_strategy,
+        "strategy": opening_strategy,
+        "boon_slot": boon["boon_slot"],
+        "transitions": transitions,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+    }
+
+
 async def _enter_stage(app: Any, vision: Any, engine: ExecutionEngine, dive_depth: int,
                        opening_strategy: str) -> Dict[str, Any]:
     started_at = time.monotonic()
@@ -566,23 +729,15 @@ async def _enter_stage(app: Any, vision: Any, engine: ExecutionEngine, dive_dept
     transitions.append(await _confirm_opening_strategy(app, opening_strategy))
     formation = await _click_until_original_absent(_FORMATION_CONFIRM, app=app, vision=vision, engine=engine)
     transitions.append({"step": "confirm_formation", **formation})
-    boon = await _submit_opening_boon(app.controller.bridge)
-    next_state, next_match = await _wait_for_boon_destination(app=app, vision=vision, engine=engine)
-    transitions.append({"step": "confirm_boon", **boon, "next_state": _match_payload(next_match, next_state)})
+    boon = await _submit_opening_boon(app.controller.bridge, transitions)
+    boon_transition = {"step": "confirm_boon", **boon}
+    transitions.append(boon_transition)
+    next_state, next_match = await _wait_for_boon_destination(
+        app=app, vision=vision, engine=engine, transitions=transitions,
+    )
+    boon_transition["next_state"] = _match_payload(next_match, next_state)
     if next_state == _REWARD_MARKER:
-        transitions.append(
-            await _run_transition(
-                "dismiss_reward",
-                _REWARD_MARKER,
-                _BOARD_READY,
-                app=app,
-                vision=vision,
-                engine=engine,
-                fixed_click_point=_REWARD_DISMISS_POINT,
-                next_timeout_sec=_BOARD_READY_TIMEOUT_SEC,
-                next_stable_scans=3,
-            )
-        )
+        await _dismiss_visual_opening_reward(app=app, vision=vision, engine=engine, transitions=transitions)
     return {
         "success": True,
         "status": "completed",

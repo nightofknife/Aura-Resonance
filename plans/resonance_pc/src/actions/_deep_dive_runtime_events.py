@@ -32,7 +32,7 @@ def create_context(event_type, owner, now, *, source_action_id=None, resume='sca
     if event_type in {'healing', 'item', 'vortex'}:
         flow = context['flow']
         flow['context_event_type'] = event_type
-        if not observation or not observation.get('click'):
+        if not observation or not (observation.get('click') or observation.get('native_entry_submitted')):
             raise ValueError('Node flow requires a recognized entry control')
         (vortex if event_type == 'vortex' else healing).start(flow, observation, now)
         context['phase'] = 'node_dispatch'
@@ -242,7 +242,10 @@ def advance_context(context, observation, now, *, event_option_policy=None):
                      and observation.get('event_type') == 'boss_battle')
     enemy_board = ((observation.get('scene') == 'enemy_turn' and observation.get('enemy_turn') is True)
                    or boss_boundary)
-    o = (dict(observation, scene='board', event_board=True) if enemy_board else observation)
+    native_passive_reward = (context['event_type'] == 'passive_reward'
+                             and observation.get('source') == 'bridge')
+    o = (dict(observation, scene='board', event_board=True)
+         if enemy_board and not native_passive_reward else observation)
     scene = o.get('scene', 'unknown')
     kind = context['event_type']
     if not o.get('valid'):
@@ -288,8 +291,10 @@ def advance_context(context, observation, now, *, event_option_policy=None):
     if now - context.get('battle_attempt_started', context['started']) >= total_limit:
         return _step('blocked', reason='event_total_timeout')
     if kind == 'passive_reward':
-        return _reward_step(context, o, now, BOARD | {'rest_area', 'event_options',
-                                                     'event_ending', 'battle_formation', 'shop'})
+        resume_scenes = BOARD | {'rest_area', 'event_options', 'event_ending', 'battle_formation', 'shop'}
+        if context['resume'] in {'enemy_wait', 'operation_outcome', 'verify_move'}:
+            resume_scenes.update({'enemy_turn', 'event_entry'})
+        return _reward_step(context, o, now, resume_scenes)
     # Rewards inserted before a battle/shop or healing/vortex content retain
     # their parent. Returning to the board here does not finish that node.
     prefix = 'vortex' if kind == 'vortex' else 'event'

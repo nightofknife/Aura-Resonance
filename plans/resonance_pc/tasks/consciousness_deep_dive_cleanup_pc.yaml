@@ -10,12 +10,10 @@ consciousness_deep_dive_cleanup_pc:
   steps:
     require_bridge:
       action: resonance_pc.require_deep_dive_bridge
-    require_resolution:
-      depends_on: require_bridge
-      action: resonance_pc.require_client_resolution
+      params: {require_screen: true}
     initialize:
       action: resonance_pc.deep_dive_cleanup_initialize
-      depends_on: require_resolution
+      depends_on: require_bridge
     advance:
       action: resonance_pc.deep_dive_cleanup_advance
       depends_on: initialize

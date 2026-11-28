@@ -12,6 +12,7 @@ from ._deep_dive_option_priority import choose_event_option
 
 PLAN = Path(__file__).resolve().parents[2]
 ROOT = PLAN / 'templates/deep_dive/deep_dive_events'
+LOST_ITEM_EXIT_MIN_SCORE = .85
 
 
 @lru_cache(None)
@@ -146,10 +147,15 @@ def detect_event_page(rgb, *, read_choices=True):
     exit_score,_=match(gray,'result_exit',(500,610,790,719))
     item_exit,_=match(gray,'result_exit_item',(500,600,790,675))
     item_title,_=match(gray,'result_items_title',(510,120,790,215))
-    if exit_score>=.9 or item_exit>=.9 and item_title>=.85:
-        # Exit text shared by obtained/lost/intensified results, but never a selection page.
-        if confirm<.75:
-            return {'scene':'event_result','click':[280,630]}
+    if confirm < .75 and (
+        exit_score >= .9
+        or (item_exit >= .9 and item_title >= .85)
+        or (
+            item_exit >= LOST_ITEM_EXIT_MIN_SCORE
+            and match(gray, 'result_lost_title', (510, 140, 790, 240))[0] >= .85
+        )
+    ):
+        return {'scene': 'event_result', 'click': [280, 630]}
     heading=heading_present(gray)
     if heading is None:
         return {'scene':'uncertain_event','valid':False}

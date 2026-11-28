@@ -1,15 +1,16 @@
 """Translate the client's event choice panels into the existing event policies."""
 from functools import lru_cache
+import json
+from pathlib import Path
 
 from packages.resonance_shared.deep_dive_event_options import supports_native_event_option
 from packages.resonance_shared.deep_dive_interval import INTERVAL_PANELS
 
-from ._deep_dive_event_vision import catalog as healing_catalog
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT
-from ._deep_dive_vortex_vision import catalog as vortex_catalog
 
 
 FORMATION_KINDS = {'formation_fill', 'formation_start', 'formation_leave'}
+EVENT_CATALOGS = {'healing': 'deep_dive_events/healing.json', 'vortex': 'deep_dive_vortex/catalog.json'}
 
 
 def is_formation_page(observation):
@@ -20,10 +21,11 @@ def is_formation_page(observation):
 
 @lru_cache(maxsize=2)
 def _policy(event_type):
-    catalog = {'healing': healing_catalog, 'vortex': vortex_catalog}.get(event_type)
-    if catalog is None:
+    relative_path = EVENT_CATALOGS.get(event_type)
+    if relative_path is None:
         return {}, {}
-    data = catalog()
+    path = Path(__file__).resolve().parents[2] / 'data' / relative_path
+    data = json.loads(path.read_text(encoding='utf8'))
     return ({event['id']: event for event in data['events']},
             {option['id']: option for option in data['options']})
 
@@ -77,6 +79,12 @@ def observe_choice(observation, snapshot, event_type):
         return dict(current, scene=kind, native=controls[0], battle_retry=retry)
     if kind == 'shop_feedback':
         return dict(current, scene='reward_obtained', native=controls[0])
+    if kind == 'item_feedback':
+        return dict(current, scene='event_result', native=controls[0])
+    if kind == 'boss_entry':
+        return dict(current, scene='event_entry', event_type='boss_battle', native=controls[0])
+    if kind == 'event_end':
+        return dict(current, scene='event_ending', native=controls[0])
     if kind in {'battle_victory', 'battle_retry_confirm'}:
         return dict(current, scene=kind, native=controls[0])
     if kind in FORMATION_KINDS:
@@ -91,6 +99,8 @@ def observe_choice(observation, snapshot, event_type):
                  for row, control in zip(rows, controls)]
         return dict(current, scene='event_card_selection', cards=cards)
 
+    if kind != 'options':
+        return current
     events, options = _policy(event_type)
     event = events.get(subject_id)
     if not event or any(row['id'] not in event['options'] or row['id'] not in options for row in rows):

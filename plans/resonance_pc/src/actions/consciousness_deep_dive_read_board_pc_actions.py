@@ -10,7 +10,8 @@ from ....aura_base.src.platform.contracts import TargetRuntimeError
 def require_deep_dive_bridge(require_live: bool = True, require_turn: bool = False, bridge=None,
                              require_controls: bool = False, require_actions: bool = False,
                              require_choices: bool = False, require_interval: bool = False,
-                             require_battle_retry: bool = False, require_shop: bool = False):
+                             require_battle_retry: bool = False, require_shop: bool = False,
+                             require_screen: bool = False):
     if not bridge.enabled:
         raise TargetRuntimeError("input_bridge_required", "识海深潜需要桥接输入器。请在设置中启用并保存「使用桥接输入器」。")
     capabilities = bridge.ensure_ready() if require_live else {}
@@ -24,6 +25,8 @@ def require_deep_dive_bridge(require_live: bool = True, require_turn: bool = Fal
         raise TargetRuntimeError("deep_dive_action_unsupported", "当前桥接宿主未提供识海深潜移动和层转操作。")
     if require_choices and not capabilities.get("deep_dive_choices"):
         raise TargetRuntimeError("deep_dive_choice_unsupported", "当前桥接宿主未提供识海深潜事件选项。")
+    if require_screen and not capabilities.get("deep_dive_screen"):
+        raise TargetRuntimeError("deep_dive_screen_unsupported", "当前桥接宿主未提供识海深潜原生页面读取。")
     if require_interval and not capabilities.get("deep_dive_interval"):
         raise TargetRuntimeError("deep_dive_interval_unsupported", "请更新游戏中已加载的桥接器，以使用位面间隙设置。")
     if require_battle_retry and not capabilities.get("deep_dive_battle_retry"):

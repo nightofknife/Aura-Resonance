@@ -4,20 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from packages.aura_core.api import action_info, requires_services
+from packages.aura_core.api import requires_services
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.utils.exceptions import StopTaskException
 
 from ._deep_dive_entry_card_vision import classify_entry_card
 
 
-@action_info(
-    name="resonance_pc.deep_dive_entry_card_probe",
-    public=True,
-    read_only=True,
-    timeout=10,
-    description="Identify the node confirmation card without clicking or entering it.",
-)
 @requires_services(app="plans/aura_base/app")
 def probe_deep_dive_entry_card(app: Any = None) -> dict:
     if app is None:

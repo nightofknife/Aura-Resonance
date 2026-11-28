@@ -19,8 +19,12 @@ def start(state, observation, now):
         if key.startswith('vortex_'):state.pop(key,None)
     state.update(vortex_started=now,vortex_progress_at=now,vortex_seen=False,
                  vortex_submitted=False,vortex_trace=[])
-    state['vortex_pending']={'kind':'entry','point':list(observation['click']),
-                            'tries':1,'at':now}
+    pending = {'kind': 'entry', 'tries': 1, 'at': now}
+    if observation.get('native_entry_submitted'):
+        pending['native_submitted'] = True
+    else:
+        pending['point'] = list(observation['click'])
+    state['vortex_pending'] = pending
 
 
 def _issue(state,kind,input_target,now,**extra):
@@ -175,9 +179,9 @@ def step(state,o,now,*,event_option_policy=None):
                       target=target.get('point'))
     if result:
         kind = 'discard_new_item' if scene == ITEM_REPLACEMENT else 'dismiss_result'
-        target=choice_target(o,'discard',o.get('click')) if scene==ITEM_REPLACEMENT else o['click']
+        target = choice_target(o, 'discard' if scene == ITEM_REPLACEMENT else 'confirm', o.get('click'))
         return _issue(state,kind,target,now,visual=o.get('result_visual'),result_scene=scene)
     if scene=='event_ending' and now-state['vortex_stable_since']>=1.:
-        return _issue(state,'dismiss_ending',o['click'],now)
+        return _issue(state, 'dismiss_ending', choice_target(o, 'confirm', o.get('click')), now)
     if now-state['vortex_progress_at']>=30:return _fail(state,'未知事件页面或过渡超时')
     return 'wait',None

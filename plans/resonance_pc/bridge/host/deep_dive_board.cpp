@@ -1,8 +1,11 @@
 #include "deep_dive_board.hpp"
+#include "deep_dive_cleanup.hpp"
 #include "deep_dive_event_choices.hpp"
 #include "deep_dive_event_trace.hpp"
 #include "deep_dive_formation.hpp"
 #include "deep_dive_interval.hpp"
+#include "deep_dive_opening.hpp"
+#include "deep_dive_screen.hpp"
 #include "deep_dive_shop.hpp"
 #include "il2cpp.hpp"
 
@@ -260,6 +263,7 @@ Json read_turn(const LuaView &lua, int model) {
   const auto config = lua.field(model, "cfg");
   const auto plane = lua.type(config) == lua_table ? lua.number(config, "faceIndex") : std::nullopt;
   const auto base_distance = plane ? lua.number(config, "initialDistance") : std::nullopt;
+  const auto inspiration_total = plane ? lua.number(config, "specialNum") : std::nullopt;
   lua.restore(config - 1);
   if (!plane || *plane < 1)
     throw Error("deep_dive_turn_unavailable", "Deep Dive plane index is unavailable");
@@ -280,6 +284,14 @@ Json read_turn(const LuaView &lua, int model) {
           {"moves_left", std::max(*total_moves - *moves, 0)},
           {"rotations_used", *rotations}, {"rotations_total", *total_rotations},
           {"rotations_left", std::max(*total_rotations - *rotations, 0)}};
+  // ShowSpecialInfo excludes the player's current cell when counting remaining inspiration.
+  if (inspiration_total) {
+    const auto inspiration_left = lua.quota(model, "GetCurSpecialNum");
+    if (inspiration_left && *inspiration_left <= *inspiration_total) {
+      turn["collected_count"] = *inspiration_total - *inspiration_left;
+      turn["inspiration_total"] = *inspiration_total;
+    }
+  }
   const auto bonus_distance = read_item_attr(lua, model, "StepDistanceItem");
   if (base_distance && *base_distance > 0 && bonus_distance
       && *bonus_distance <= std::numeric_limits<int>::max() - *base_distance) {
@@ -546,10 +558,18 @@ Json perform_choice(LuaState *state, const Json &args) {
   const int subject = read ? 0 : args.at("subject_id").get<int>();
   const int index = read ? 0 : args.at("index").get<int>();
   const int id = read ? 0 : args.at("id").get<int>();
+  int recovery_map_id = 0;
+  if (const auto requested = args.find("recovery_map_id"); requested != args.end()) {
+    if (!requested->is_number_integer() || *requested < 1 || *requested > std::numeric_limits<int>::max())
+      throw Error("deep_dive_choice_invalid", "Invalid Deep Dive recovery map");
+    recovery_map_id = requested->get<int>();
+    if (!read && (kind != "cleanup" || command != "confirm" || subject != recovery_map_id))
+      throw Error("deep_dive_choice_invalid", "Invalid Deep Dive recovery choice");
+  }
   const bool service = kind == "rest_main" || kind == "rest_recruit" ||
                        kind == "rest_revive" || kind == "rest_intensify" ||
                        kind == "rest_awake" || kind == "rest_feedback" ||
-                       kind == "shop" || kind == "shop_feedback";
+                       kind == "shop" || kind == "shop_feedback" || kind == "opening";
   constexpr int service_limit = 1024;
   const bool allow_fill = args.value("formation_fill_enabled", true);
   std::string fixed_party;
@@ -568,7 +588,9 @@ Json perform_choice(LuaState *state, const Json &args) {
                               kind == "rest_shortage" || kind == "rest_finish" ||
                               kind == "formation_fill" || kind == "formation_start" ||
                               kind == "formation_leave" || kind == "formation_quit" ||
-                              kind == "formation_finish" || service;
+                              kind == "formation_finish" || kind == "cleanup" ||
+                              kind == "item_feedback" || kind == "boss_entry" ||
+                              kind == "event_end" || service;
   const bool supported = selection ? command != "discard" :
                          (kind == "replacement" && command == "discard") ||
                          (direct_confirm && command == "confirm");
@@ -589,7 +611,8 @@ Json perform_choice(LuaState *state, const Json &args) {
   }
   static const auto script = std::string(deep_dive_choice_prelude) + deep_dive_reward_choice_script +
                              deep_dive_formation_script + deep_dive_interval_script +
-                             deep_dive_shop_script + deep_dive_event_choice_script;
+                             deep_dive_shop_script + deep_dive_opening_script + deep_dive_cleanup_script +
+                             deep_dive_screen_script + deep_dive_event_choice_script;
   if (lua.api.load_string(state, script.c_str()) != 0)
     throw Error("deep_dive_choice_failed", "Could not load the Deep Dive choice handler");
   lua.api.push_value(state, tracking);
@@ -600,7 +623,10 @@ Json perform_choice(LuaState *state, const Json &args) {
     lua.api.push_integer(state, value);
   lua.api.push_integer(state, allow_fill ? 1 : 0);
   lua.api.push_string(state, fixed_party.c_str());
-  if (lua.api.protected_call(state, 9, 1, 0, 0, nullptr) != 0) {
+  const bool include_screen = read && args.value("include_screen", false);
+  lua.api.push_integer(state, include_screen ? 1 : 0);
+  lua.api.push_integer(state, recovery_map_id);
+  if (lua.api.protected_call(state, 11, 1, 0, 0, nullptr) != 0) {
     size_t size{};
     const auto error = lua.api.string(state, lua.top(), &size);
     throw Error("deep_dive_choice_failed", error ? std::string(error, std::min(size_t(240), size))
@@ -615,9 +641,30 @@ Json perform_choice(LuaState *state, const Json &args) {
     return {{"status", status}};
   Json snapshot = {{"schema", "resonance_pc.deep_dive_choice.v1"}, {"status", status},
                    {"kind", lua.text(result, "kind")}};
-  for (const auto field : {"reason", "wait_reason", "roster_detail"})
+  for (const auto field : {"reason", "wait_reason", "roster_detail", "page", "outcome",
+                           "scene", "event_type", "panel_url"})
     if (auto value = lua.text(result, field); !value.empty())
       snapshot[field] = std::move(value);
+  if (include_screen) {
+    const bool player_turn = lua.flag(result, "player_turn");
+    snapshot["player_turn"] = player_turn;
+    if (player_turn) {
+      const auto modules = lua.field(registry, "_LOADED");
+      const auto model = lua.type(modules) == lua_table
+                             ? lua.field(modules, "UICubeRogueMain/UICubeRogueMainDataModel") : 0;
+      if (model && lua.type(model) == lua_table) {
+        if (const auto map = lua.number(model, "mapID"))
+          snapshot["map_id"] = *map;
+        try {
+          snapshot["turn"] = read_turn(lua, model);
+        } catch (const Error &error) {
+          if (error.code != "deep_dive_turn_unavailable")
+            throw;
+        }
+      }
+      lua.restore(result);
+    }
+  }
   for (const auto field : {"selected_count", "available_count", "required_count"})
     if (const auto value = lua.number(result, field))
       snapshot[field] = *value;
@@ -661,7 +708,8 @@ Json perform_choice(LuaState *state, const Json &args) {
   const auto observed_revision = lua.number(result, "revision").value_or(0);
   const int rows = lua.field(result, "rows");
   const auto count = lua.type(rows) == lua_table ? lua.api.raw_length(state, rows) : 0;
-  const bool observed_service = observed_kind == "shop" || observed_kind.rfind("rest_", 0) == 0;
+  const bool observed_service = observed_kind == "shop" || observed_kind == "opening" ||
+                                observed_kind.rfind("rest_", 0) == 0;
   if (!observed_revision || !observed_subject || count == 0 ||
       count > (observed_service ? size_t(service_limit) : 4))
     throw Error("deep_dive_choice_failed", "Invalid Deep Dive choice list");
@@ -922,12 +970,21 @@ nlohmann::json execute_deep_dive_action(const nlohmann::json &args) {
 
 nlohmann::json execute_deep_dive_choice(const nlohmann::json &args) {
   const auto state = current_lua_state();
-  if (!state) {
-    // The client can replace its Lua environment during battle exit.
-    if (args.at("command") == "read")
-      return {{"schema", "resonance_pc.deep_dive_choice.v1"}, {"status", "waiting"}, {"kind", "none"}};
+  if (state)
+    return perform_choice(state, args);
+
+  // The client can replace its Lua environment during battle exit.
+  if (args.at("command") != "read")
     return {{"status", "waiting"}};
+
+  Json snapshot = {{"schema", "resonance_pc.deep_dive_choice.v1"},
+                   {"status", "waiting"},
+                   {"kind", "none"},
+                   {"wait_reason", "lua_state_unavailable"}};
+  if (args.value("include_screen", false)) {
+    snapshot["scene"] = "unknown";
+    snapshot["player_turn"] = false;
   }
-  return perform_choice(state, args);
+  return snapshot;
 }
 } // namespace bridge

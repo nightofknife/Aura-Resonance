@@ -83,6 +83,7 @@ consciousness_deep_dive_planned_run_pc:
         require_turn: true
         require_actions: true
         require_choices: true
+        require_screen: true
         require_interval: true
         require_battle_retry: "{{ inputs.battle_retry_limit > 0 }}"
         require_shop: "{{ inputs.shop_policy.enabled | default(true) }}"

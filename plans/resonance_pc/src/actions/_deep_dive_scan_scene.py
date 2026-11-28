@@ -105,7 +105,7 @@ def _player_board(rgb: np.ndarray) -> dict:
     for name, region, threshold in (
         ("selection_confirm", (500, 600, 810, 675), .85),
         ("result_exit", (500, 610, 790, 719), .90),
-        ("result_exit_item", (500, 600, 790, 675), .90),
+        ("result_exit_item", (500, 600, 790, 675), event.LOST_ITEM_EXIT_MIN_SCORE),
     ):
         absent("event:"+name, event.match(gray, name, region)[0], threshold)
     if event.heading_present(gray) is not False:
