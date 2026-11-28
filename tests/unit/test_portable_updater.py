@@ -122,6 +122,18 @@ def test_cpu_update_replaces_updater_and_preserves_user_files(tmp_path):
         assert (root / name).read_bytes() == b"user-content"
 
 
+def test_completed_update_allows_relocated_installation_to_update(tmp_path):
+    root = make_release(tmp_path / "installed", "v1.9.9")
+    updater.install_staged_release(make_release(tmp_path / "first", "v1.9.10"), root)
+    destination = tmp_path / "moved"
+    destination.mkdir()
+    relocated_root = root.rename(destination / "renamed")
+    opener, _ = release_server(make_release(tmp_path / "second", "v1.9.11"))
+
+    assert updater.perform_update(relocated_root, opener=opener) is True
+    assert updater.load_installed_release(relocated_root) == ("v1.9.11", "cpu")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows extended path handling")
 def test_update_installs_packaged_file_under_long_nested_path(tmp_path):
     root = make_release(tmp_path / "installed", "v1.9.9")
@@ -447,6 +459,13 @@ def test_pending_update_is_recovered_before_any_network_request(tmp_path, monkey
 
     def disallow_network(*args, **kwargs):
         pytest.fail("download began before recovery was acknowledged")
+
+    relocated_root = root.rename(tmp_path / "renamed")
+    interrupted = snapshot(relocated_root)
+    with pytest.raises(updater.UpdateError, match="无法识别更新记录"):
+        updater.perform_update(relocated_root, opener=disallow_network)
+    assert snapshot(relocated_root) == interrupted
+    relocated_root.rename(root)
 
     with pytest.raises(updater.UpdateError, match="已恢复"):
         updater.perform_update(root, opener=disallow_network)
