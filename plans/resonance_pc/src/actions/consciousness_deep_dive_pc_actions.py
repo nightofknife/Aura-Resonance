@@ -10,6 +10,7 @@ from uuid import uuid4
 from packages.aura_core.api import action_info, requires_services
 from packages.aura_core.engine import ExecutionEngine
 from packages.aura_core.observability.logging.core_logger import logger
+from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.scheduler.utils import resolve_base_path
 from packages.aura_core.utils.exceptions import StopTaskException
@@ -18,6 +19,8 @@ from ....aura_base.src.actions.input_actions import click as aura_click
 from ....aura_base.src.actions.input_actions import drag as aura_drag
 from ....aura_base.src.actions.wait_actions import sleep as aura_sleep
 from ....aura_base.src.actions.wait_actions import wait_for_image as aura_wait_for_image
+from ._deep_dive_choice_target import choice_signature, choice_target, native_key, preferred_card
+from ._deep_dive_native_choices import observe_choice
 from ._deep_dive_opening_options import DIVE_DEPTHS, OPENING_STRATEGIES, validate_opening_options
 from ._deep_dive_opening_vision import OpeningChoice, OpeningFrame
 
@@ -63,24 +66,6 @@ _FORMATION_CONFIRM = _TemplateTarget(
     "templates/deep_dive/consciousness_deep_dive/formation_confirm.png",
     (960, 565, 320, 150),
     0.86,
-)
-_BOON_MIDDLE_UNSELECTED = _TemplateTarget(
-    "boon_middle_unselected",
-    "templates/deep_dive/consciousness_deep_dive/boon_middle_unselected.png",
-    (590, 470, 100, 100),
-    0.90,
-)
-_BOON_MIDDLE_SELECTED = _TemplateTarget(
-    "boon_middle_selected",
-    "templates/deep_dive/consciousness_deep_dive/boon_middle_selected.png",
-    (590, 470, 100, 100),
-    0.90,
-)
-_BOON_CONFIRM = _TemplateTarget(
-    "boon_confirm",
-    "templates/deep_dive/consciousness_deep_dive/boon_confirm.png",
-    (550, 595, 210, 100),
-    0.88,
 )
 _REWARD_MARKER = _TemplateTarget(
     "reward_marker",
@@ -417,7 +402,6 @@ async def _run_transition(
     next_timeout_sec: float = _NEXT_STATE_TIMEOUT_SEC,
     next_stable_scans: int = 2,
     next_error_code: Optional[str] = None,
-    board_also_ready: bool = False,
 ) -> Dict[str, Any]:
     started_at = time.monotonic()
     click_result = await _click_until_original_absent(
@@ -427,23 +411,17 @@ async def _run_transition(
         engine=engine,
         fixed_click_point=fixed_click_point,
     )
-    if board_also_ready:
-        next_state, next_match = await _wait_for_boon_destination(app=app, vision=vision, engine=engine)
-    else:
-        next_match = await _wait_for_target(
-            next_state,
-            app=app,
-            vision=vision,
-            engine=engine,
-            timeout_sec=next_timeout_sec,
-            stable_scans=next_stable_scans,
-            error_code=next_error_code
-            or (
-                "deep_dive_board_not_ready"
-                if next_state.key == _BOARD_READY.key
-                else "deep_dive_next_state_timeout"
-            ),
-        )
+    next_match = await _wait_for_target(
+        next_state,
+        app=app,
+        vision=vision,
+        engine=engine,
+        timeout_sec=next_timeout_sec,
+        stable_scans=next_stable_scans,
+        error_code=next_error_code or (
+            "deep_dive_board_not_ready" if next_state.key == _BOARD_READY.key else "deep_dive_next_state_timeout"
+        ),
+    )
     result = {
         "step": step,
         **click_result,
@@ -459,6 +437,49 @@ async def _run_transition(
         result["elapsed_ms"],
     )
     return result
+
+
+async def _submit_opening_boon(bridge) -> dict[str, Any]:
+    deadline = time.monotonic() + _NEXT_STATE_TIMEOUT_SEC
+    previous = None
+    selection = None
+    decision = {}
+    while time.monotonic() < deadline:
+        _check_cancelled()
+        snapshot = await tracked_to_thread(bridge.read_deep_dive_choice)
+        _check_cancelled()
+        if snapshot.get("kind") == "cards" and snapshot.get("status") == "ready":
+            observation = observe_choice({}, snapshot, None)
+            cards = observation["cards"]
+            signature = choice_signature(observation)
+            if signature == previous and cards:
+                if selection is None:
+                    target = preferred_card(cards)
+                    selection = native_key(target["native"])
+                    decision = dict(boon_slot=target["native"]["index"], boon_id=target["native"]["id"],
+                                    recommended=target["recommended"],
+                                    recommended_slots=[card["native"]["index"] for card in cards
+                                                       if card["recommended"]])
+                else:
+                    target = next((card for card in cards if native_key(card["native"]) == selection), None)
+                    if target is None:
+                        raise ConsciousnessDeepDiveError("deep_dive_boon_selection_changed", "开局推力候选已变化。")
+                if not target["recommended"] and any(card["selected"] and card is not target for card in cards):
+                    raise ConsciousnessDeepDiveError("deep_dive_boon_selection_changed", "已有其他开局推力被选中。")
+                command = "confirm" if target["selected"] else "select"
+                _check_cancelled()
+                status = await tracked_to_thread(bridge.execute_deep_dive_choice, choice_target(target, command, None))
+                _check_cancelled()
+                if command == "confirm" and status == "submitted":
+                    logger.info("[DeepDiveEntry] opening boon selection %s", decision)
+                    return decision
+                if status == "changed":
+                    raise ConsciousnessDeepDiveError("deep_dive_boon_selection_changed", "开局推力候选已变化。")
+            previous = signature
+        else:
+            previous = None
+        await aura_sleep(_POLL_INTERVAL_SEC)
+    raise ConsciousnessDeepDiveError("deep_dive_boon_selection_not_confirmed", "未能通过桥接确认开局推力选择。")
 
 
 async def _wait_for_boon_destination(*, app: Any, vision: Any, engine: ExecutionEngine):
@@ -498,7 +519,7 @@ async def _wait_for_boon_destination(*, app: Any, vision: Any, engine: Execution
     public=True,
     read_only=False,
     timeout=300,
-    description="Enter Deep Dive with the requested depth and opening strategy, then select the middle boon.",
+    description="Enter Deep Dive with the requested depth and opening strategy, preferring recommended boons.",
 )
 @requires_services(
     app="plans/aura_base/app",
@@ -543,38 +564,12 @@ async def _enter_stage(app: Any, vision: Any, engine: ExecutionEngine, dive_dept
     transitions.append(await _open_depth_page(app, vision, engine))
     transitions.append(await _start_at_depth(app, dive_depth))
     transitions.append(await _confirm_opening_strategy(app, opening_strategy))
-    transitions.append(
-        await _run_transition(
-            "confirm_formation",
-            _FORMATION_CONFIRM,
-            _BOON_MIDDLE_UNSELECTED,
-            app=app,
-            vision=vision,
-            engine=engine,
-        )
-    )
-    transitions.append(
-        await _run_transition(
-            "select_middle_boon",
-            _BOON_MIDDLE_UNSELECTED,
-            _BOON_MIDDLE_SELECTED,
-            app=app,
-            vision=vision,
-            engine=engine,
-            next_error_code="deep_dive_boon_selection_not_confirmed",
-        )
-    )
-    boon = await _run_transition(
-        "confirm_boon",
-        _BOON_CONFIRM,
-        _REWARD_MARKER,
-        app=app,
-        vision=vision,
-        engine=engine,
-        board_also_ready=True,
-    )
-    transitions.append(boon)
-    if boon["next_state"]["key"] == _REWARD_MARKER.key:
+    formation = await _click_until_original_absent(_FORMATION_CONFIRM, app=app, vision=vision, engine=engine)
+    transitions.append({"step": "confirm_formation", **formation})
+    boon = await _submit_opening_boon(app.controller.bridge)
+    next_state, next_match = await _wait_for_boon_destination(app=app, vision=vision, engine=engine)
+    transitions.append({"step": "confirm_boon", **boon, "next_state": _match_payload(next_match, next_state)})
+    if next_state == _REWARD_MARKER:
         transitions.append(
             await _run_transition(
                 "dismiss_reward",
@@ -596,7 +591,7 @@ async def _enter_stage(app: Any, vision: Any, engine: ExecutionEngine, dive_dept
         "dive_depth": dive_depth,
         "opening_strategy": opening_strategy,
         "strategy": opening_strategy,
-        "boon_slot": 2,
+        "boon_slot": boon["boon_slot"],
         "transitions": transitions,
         "elapsed_ms": int((time.monotonic() - started_at) * 1000),
     }

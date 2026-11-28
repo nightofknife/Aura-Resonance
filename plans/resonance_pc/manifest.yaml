@@ -1834,6 +1834,26 @@ exports:
       type: Any
       required: false
       default: source
+    - name: interval_policy
+      type: Any
+      required: false
+      default: null
+    - name: battle_retry_limit
+      type: Any
+      required: false
+      default: 0
+    - name: shop_policy
+      type: Any
+      required: false
+      default: null
+    - name: event_option_policy
+      type: Any
+      required: false
+      default: null
+    - name: count_failed_runs
+      type: Any
+      required: false
+      default: false
   - name: resonance_pc.deep_dive_loop_begin
     module: plans.resonance_pc.src.actions.consciousness_deep_dive_loop_pc_actions
     function: begin_loop_run
@@ -1889,8 +1909,8 @@ exports:
     public: true
     read_only: false
     timeout: 300
-    description: Enter Deep Dive with the requested depth and opening strategy, then
-      select the middle boon.
+    description: Enter Deep Dive with the requested depth and opening strategy, preferring
+      recommended boons.
     parameters:
     - name: dive_depth
       type: Any
@@ -1948,11 +1968,27 @@ exports:
     - name: planning_time_budget_sec
       type: Any
       required: false
-      default: 30
+      default: 0.35
     - name: scan_route
       type: Any
       required: false
       default: cells
+    - name: interval_policy
+      type: Any
+      required: false
+      default: null
+    - name: battle_retry_limit
+      type: Any
+      required: false
+      default: 0
+    - name: shop_policy
+      type: Any
+      required: false
+      default: null
+    - name: event_option_policy
+      type: Any
+      required: false
+      default: null
   - name: resonance_pc.deep_dive_planned_run_advance
     module: plans.resonance_pc.src.actions.consciousness_deep_dive_planned_run_pc_actions
     function: advance_deep_dive_planned_run
@@ -2002,6 +2038,18 @@ exports:
       required: false
       default: false
     - name: require_choices
+      type: Any
+      required: false
+      default: false
+    - name: require_interval
+      type: Any
+      required: false
+      default: false
+    - name: require_battle_retry
+      type: Any
+      required: false
+      default: false
+    - name: require_shop
       type: Any
       required: false
       default: false
@@ -3634,8 +3682,8 @@ exports:
   - id: consciousness_deep_dive_loop_pc/consciousness_deep_dive_loop_pc
     title: 识海深潜循环（PC）
     source: tasks/consciousness_deep_dive_loop_pc.yaml
-    description: 从活动首页按所选深度和开局策略下潜，通过桥接器执行规划，结算后返回活动首页。组队补不满时结算并重开，该次不计入循环次数。循环次数为
-      -1 时持续运行。
+    description: 从活动首页按所选深度和开局策略下潜，通过桥接器执行规划，结算后返回活动首页。默认只计入成功局，可选择同时计入失败局。循环次数为 0
+      时持续运行。
     role: user_task
     domain: 活动玩法
   - id: consciousness_deep_dive_loop_pc/deep_dive_cycle_pc
@@ -3864,4 +3912,4 @@ exports:
     domain: 整顿中心
 metadata:
   generated_by: ManifestGenerator
-  generated_at: '2026-11-27T08:03:13Z'
+  generated_at: '2026-11-27T17:48:40Z'

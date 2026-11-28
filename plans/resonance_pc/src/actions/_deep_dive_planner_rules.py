@@ -24,9 +24,8 @@ BASES = {
     "B": ((0, 0, 1), (-1, 0, 0), (0, 1, 0)),
 }
 EMPTY_INSPIRATION = 54
-RULES_VERSION = "cube3-uniform-boss-v1"
+RULES_VERSION = "cube3-uniform-boss-v2"
 SUPPORTED_CUBE_SIZES = (3, 4, 5)
-SUPPORTED_MOVE_DISTANCES = (1, 2)
 
 
 def validate_cube_size(cube_size: int) -> int:
@@ -38,15 +37,15 @@ def validate_cube_size(cube_size: int) -> int:
 
 def validate_move_distance(move_distance: int) -> int:
     if (not isinstance(move_distance, Integral) or isinstance(move_distance, bool)
-            or move_distance not in SUPPORTED_MOVE_DISTANCES):
-        raise ValueError("Maximum move distance must be 1 or 2")
+            or move_distance < 1):
+        raise ValueError("Maximum move distance must be a positive integer")
     return int(move_distance)
 
 
 def rules_version(cube_size: int = 3, *, move_distance: int = 1) -> str:
     size = validate_cube_size(cube_size)
     distance = validate_move_distance(move_distance)
-    return f"cube{size}-uniform-boss-v1" + ("-move2" if distance == 2 else "")
+    return f"cube{size}-uniform-boss-v2" + (f"-move{distance}" if distance > 1 else "")
 
 
 @dataclass(frozen=True)
@@ -91,12 +90,10 @@ def coord_dict(slot: int, cube_size: int = 3) -> dict:
     return dict(slot=int(slot), face=cell.face, row=cell.row, col=cell.col)
 
 
-def manhattan(player: int, boss: int, cube_size: int = 3) -> int:
-    """Face-local distance; callers must separately check face equality."""
-    face_area = cube_size**2
-    player_row, player_col = divmod(player % face_area, cube_size)
-    boss_row, boss_col = divmod(boss % face_area, cube_size)
-    return abs(player_row - boss_row) + abs(player_col - boss_col)
+def boss_move_mask(players: np.ndarray, destinations: np.ndarray) -> np.ndarray:
+    """Keep only the collision when the player is a legal one-step destination."""
+    collision = destinations == players[:, None]
+    return (destinations >= 0) & (~collision.any(axis=1, keepdims=True) | collision)
 
 
 @dataclass(frozen=True)
@@ -116,15 +113,17 @@ class Geometry:
 def geometry(cube_size: int = 3, *, move_distance: int = 1) -> Geometry:
     """Cached integer layer permutations; the slot-count sentinel is fixed."""
     size = validate_cube_size(cube_size)
-    return _long_move_geometry(size) if validate_move_distance(move_distance) == 2 else _geometry(size)
+    distance = min(validate_move_distance(move_distance), 2 * (size - 1))
+    return _long_move_geometry(size, distance) if distance > 1 else _geometry(size)
 
 
 def _move_slots(size: int, distance: int) -> tuple[np.ndarray, np.ndarray]:
     face_area = size**2
     slot_count = len(FACES) * face_area
     offsets = ((-1, 0), (1, 0), (0, -1), (0, 1))
-    if distance == 2:
-        offsets += ((-2, 0), (-1, -1), (-1, 1), (0, -2), (0, 2), (1, -1), (1, 1), (2, 0))
+    for steps in range(2, distance + 1):
+        offsets += tuple((dr, dc) for dr in range(-steps, steps + 1)
+                         for dc in range(-steps, steps + 1) if abs(dr) + abs(dc) == steps)
     moves = np.full((slot_count, len(offsets)), -1, dtype=np.int64)
     counts = np.zeros(slot_count, dtype=np.int64)
     for slot in range(slot_count):
@@ -138,10 +137,10 @@ def _move_slots(size: int, distance: int) -> tuple[np.ndarray, np.ndarray]:
     return moves, counts
 
 
-@lru_cache(maxsize=len(SUPPORTED_CUBE_SIZES))
-def _long_move_geometry(size: int) -> Geometry:
+@lru_cache(maxsize=sum(2 * (size - 1) - 1 for size in SUPPORTED_CUBE_SIZES))
+def _long_move_geometry(size: int, distance: int) -> Geometry:
     base = _geometry(size)
-    moves, counts = _move_slots(size, 2)
+    moves, counts = _move_slots(size, distance)
     return replace(base, moves=moves, counts=counts)
 
 
@@ -155,24 +154,37 @@ def _geometry(size: int) -> Geometry:
     points = np.asarray([normal * layers[-1] + u * col + v * row
                          for normal, u, v in bases for row in layers for col in layers])
     normals = np.repeat(bases[:, 0], face_area, axis=0)
-    inverse = {tuple(p) + tuple(n): i for i, (p, n) in enumerate(zip(points, normals))}
+    radius = layers[-1]
+    width = 2 * radius + 1
+
+    def sticker_keys(positions, directions):
+        x, y, z = (positions + radius).T
+        a, b, c = (directions + 1).T
+        return ((x * width + y) * width + z) * 27 + (a * 3 + b) * 3 + c
+
+    inverse = np.full(width**3 * 27, -1, dtype=np.int64)
+    inverse[sticker_keys(points, normals)] = np.arange(slot_count)
     specs = tuple((axis, layer, sign) for axis in range(3)
                   for layer in layers for sign in (-1, 1))
     ids = {spec: i for i, spec in enumerate(specs)}
     rotations = np.tile(np.arange(slot_count + 1, dtype=np.int64), (len(specs), 1))
+    axes_basis = np.eye(3, dtype=np.int64)
     for rotation_id, (axis, layer, sign) in enumerate(specs):
-        unit = np.eye(3, dtype=np.int64)[axis]
-        for slot, (point, normal) in enumerate(zip(points, normals)):
-            if point[axis] == layer:
-                moved = sign * np.cross(unit, point) + unit * (unit @ point)
-                turned = sign * np.cross(unit, normal) + unit * (unit @ normal)
-                rotations[rotation_id, slot] = inverse[tuple(moved) + tuple(turned)]
+        selected = np.flatnonzero(points[:, axis] == layer)
+        layer_points, layer_normals = points[selected], normals[selected]
+        unit = axes_basis[axis]
+        moved = sign * np.cross(unit, layer_points) + layer_points[:, axis, None] * unit
+        turned = sign * np.cross(unit, layer_normals) + layer_normals[:, axis, None] * unit
+        rotations[rotation_id, selected] = inverse[sticker_keys(moved, turned)]
     actor = np.empty((slot_count, 4), dtype=np.int64)
-    for slot in range(slot_count):
-        for tangent_index, tangent in enumerate(bases[slot // face_area, 1:]):
+    for face, face_basis in enumerate(bases):
+        face_slots = slice(face * face_area, (face + 1) * face_area)
+        for tangent_index, tangent in enumerate(face_basis[1:]):
             axis = int(np.flatnonzero(tangent)[0])
             for sign_index, sign in enumerate((-1, 1)):
-                actor[slot, 2 * tangent_index + sign_index] = ids[axis, int(points[slot, axis]), sign]
+                actor[face_slots, 2 * tangent_index + sign_index] = [
+                    ids[axis, int(coordinate), sign] for coordinate in points[face_slots, axis]
+                ]
     symmetries = []
     for axes in itertools.permutations(range(3)):
         for signs in itertools.product((-1, 1), repeat=3):
@@ -180,8 +192,8 @@ def _geometry(size: int) -> Geometry:
             for row, col in enumerate(axes):
                 matrix[row, col] = signs[row]
             if round(np.linalg.det(matrix)) == 1:
-                symmetries.append([inverse[tuple(matrix @ p) + tuple(matrix @ n)]
-                                   for p, n in zip(points, normals)] + [slot_count])
+                mapping = inverse[sticker_keys(points @ matrix.T, normals @ matrix.T)]
+                symmetries.append(np.r_[mapping, slot_count])
     symmetries = np.asarray(symmetries, dtype=np.int64)
     moves, counts = _move_slots(size, 1)
     for array in (points, normals, rotations, actor, symmetries):
@@ -296,30 +308,35 @@ class BossOutcome:
 
 
 @lru_cache(maxsize=54 * 54)
-def boss_outcomes(player: int, boss: int, *, cube_size: int = 3) -> tuple[BossOutcome, ...]:
+def boss_outcomes(player: int, boss: int, *, cube_size: int = 3,
+                  moves: int = 1, rotations: int = 1) -> tuple[BossOutcome, ...]:
     player, boss = validate_slot(player, cube_size), validate_slot(boss, cube_size)
     if player == boss:
         return (BossOutcome(player, boss, None, len(FACES) * cube_size**2, 1.0, True, ()),)
     geo = geometry(cube_size)
-    face_area = cube_size**2
-    distance = manhattan(player, boss, cube_size)
-    destinations = [int(m) for m in geo.boss_moves[boss, :geo.boss_counts[boss]]
-                    if player // face_area != boss // face_area
-                    or manhattan(player, int(m), cube_size) == distance - 1]
+    destinations = tuple(map(int, geo.boss_moves[boss, :geo.boss_counts[boss]]))
+    if not moves:
+        destinations = (boss,)
+    elif player in destinations:
+        destinations = (player,)
     result = []
     for destination in destinations:
-        move = move_dict(boss, destination, "boss", cube_size=cube_size)
+        sequence = (move_dict(boss, destination, "boss", cube_size=cube_size),) if moves else ()
+        probability = 1.0 / len(destinations)
         if destination == player:
             result.append(BossOutcome(player, destination, None, len(geo.moves),
-                                      1.0 / len(destinations), True, (move,)))
+                                      probability, True, sequence))
+            continue
+        consumed = destination if moves else len(geo.moves)
+        if not rotations:
+            result.append(BossOutcome(player, destination, None, consumed, probability, False, sequence))
             continue
         for rotation_id in geo.actor_rotations[destination]:
             rotation_id = int(rotation_id)
             perm = geo.rotations[rotation_id]
             rotation = rotation_dict(rotation_id, destination, "boss", cube_size=cube_size)
             result.append(BossOutcome(int(perm[player]), int(perm[destination]), rotation_id,
-                                      destination, 1.0 / (4 * len(destinations)), False,
-                                      (move, rotation)))
+                                      consumed, probability / 4, False, (*sequence, rotation)))
     return tuple(result)
 
 

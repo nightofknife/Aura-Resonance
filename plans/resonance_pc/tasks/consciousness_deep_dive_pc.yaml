@@ -6,12 +6,13 @@ consciousness_deep_dive_pc:
     description: Enter the Consciousness Deep Dive board at the requested depth and opening strategy.
     entry_point: false
     inputs:
-      - {name: dive_depth, type: number, default: 1, strict_integer: true, min: 1, max: 5}
+      - {name: dive_depth, type: number, default: 1, strict_integer: true, min: 1, max: 7}
       - {name: opening_strategy, type: enum, default: source, enum: [source, waxing_waning, revival, defense]}
 
   steps:
     require_bridge:
       action: resonance_pc.require_deep_dive_bridge
+      params: {require_choices: true}
     require_resolution:
       depends_on: require_bridge
       action: resonance_pc.require_client_resolution

@@ -316,13 +316,13 @@ def plan_chase(player: int, boss: int, turn_budget: int, cancel_check=None,
         raise ValueError("Unsupported chase objective")
     player_moves = ("one face-local adjacent move and one layer rotation per player turn"
                     if move_distance == 1 else
-                    "one face-local move within Manhattan distance two and one layer rotation per player turn")
+                    f"one face-local move within Manhattan distance {move_distance} and one layer rotation per player turn")
     result = dict(strategy="chase", objective=objective,
                   rules_version=rules_version(cube_size, move_distance=move_distance),
                   turn_budget=turn_budget, player=coord_dict(player, cube_size), boss=coord_dict(boss, cube_size),
                   rule_assumptions=[player_moves,
-                                    "boss chooses uniformly among legal face-local moves then four rotations",
-                                    "same-face boss moves only reduce Manhattan distance",
+                                    "boss moves into the player if face-local adjacent, otherwise chooses a legal neighbour uniformly",
+                                    "boss chooses uniformly among four layer rotations after a nonterminal move",
                                     "move collision ends the turn before any remaining rotation",
                                     "node events, extra actions and battle victory are outside this model"],
                   next_action=None, player_turn_actions=[], predicted_boss_branches=[])

@@ -131,6 +131,9 @@ void Runtime::observe() {
     capabilities_["deep_dive_controls"] = capabilities_["deep_dive_board"];
     capabilities_["deep_dive_actions"] = capabilities_["deep_dive_board"];
     capabilities_["deep_dive_choices"] = capabilities_["deep_dive_board"];
+    capabilities_["deep_dive_interval"] = capabilities_["deep_dive_choices"];
+    capabilities_["deep_dive_battle_retry"] = capabilities_["deep_dive_choices"];
+    capabilities_["deep_dive_shop"] = capabilities_["deep_dive_choices"];
   }
 }
 Json Runtime::result() {

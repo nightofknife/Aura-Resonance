@@ -5,7 +5,10 @@
 namespace bridge {
 
 inline constexpr auto deep_dive_choice_prelude = R"lua(
-local tracking, command, revision, kind, subject, index, id = ...
+local tracking, command, revision, kind, subject, index, id, fill_flag, fixed_ids = ...
+local allow_formation_fill = fill_flag ~= 0
+local fixed_party = {}
+for member in string.gmatch(fixed_ids or '', '%d+') do fixed_party[tonumber(member)] = true end
 
 local function visible(widget)
     if type(widget) == 'table' then widget = widget.self end
@@ -58,8 +61,20 @@ local function read_event_choice(url)
     return panel
 end
 
+local function battle_button_available(widget)
+    if not visible(widget) then return false end
+    if type(widget) == 'table' then widget = widget.self end
+    local button = widget.Btn
+    return not button or (not button:IsNull() and button.isActiveAndEnabled and button:IsInteractable())
+end
+
 local function read_battle_result(url)
-    if url ~= 'UI/Settlement/Settlement' then return nil end
+    local retry = tracking.battle_retry_attempt
+    if url ~= 'UI/Settlement/Settlement' then
+        if retry then retry.left_settlement = true end
+        tracking.battle_retry_prompt = nil
+        return nil
+    end
     local prefix = 'UISettlement/UISettlement'
     local view = package.loaded[prefix .. 'View']
     if not view then return nil end
@@ -72,6 +87,36 @@ local function read_battle_result(url)
     local model = package.loaded[prefix .. 'DataModel']
     local buttons = package.loaded[prefix .. 'ViewFunction']
     local level = model and model.LevelCA and reward_choice_id(model.LevelCA.id)
+    local info = PlayerData and PlayerData.BattleInfo
+    local result = info and info.BattleResult
+    if retry then
+        if level == retry.level and (not retry.left_settlement or not result or result == retry.result) then
+            panel.wait_reason = 'battle_retry_in_progress'
+            return panel
+        end
+        tracking.battle_retry_attempt = nil
+    end
+    local prompt = view.Group_SettlementPrompt
+    local owned_prompt = tracking.battle_retry_prompt
+    if visible(prompt) then
+        panel.kind = 'battle_retry_confirm'
+        local confirm_retry = buttons and buttons.Settlement_Group_SettlementPrompt_Btn_Confirm_Click
+        if not (defeat and owner and not owner.IsPlayAnimator and level and owned_prompt
+                and owned_prompt.level == level and result and owned_prompt.result == result
+                and info and reward_choice_id(info.battleStageId) == level
+                and battle_button_available(prompt.Btn_Confirm) and type(confirm_retry) == 'function') then
+            return panel
+        end
+        panel.identity, panel.subject_id, panel.content = prompt.self, level, result
+        panel.rows = {{id=level, index=1, disabled=false, selected=false}}
+        panel.confirm = function()
+            tracking.battle_retry_attempt = {level=level, result=result}
+            tracking.battle_retry_prompt = nil
+            confirm_retry(nil, nil)
+        end
+        panel.ready = true
+        return panel
+    end
     local handler = victory and 'Settlement_Group_CubeVictory_Btn_Next_Click'
         or 'Settlement_Group_CubeDefeat_Btn_Next_Click'
     local confirm = buttons and buttons[handler]
@@ -80,9 +125,19 @@ local function read_battle_result(url)
         return panel
     end
     panel.identity = group.self
-    panel.subject_id = level
+    panel.subject_id, panel.content = level, result
     panel.rows = {{id=level, index=1, disabled=false, selected=false}}
     panel.confirm = confirm
+    local open_retry = buttons.Settlement_Group_CubeDefeat_Btn_Restart_Click
+    if defeat and result and info and reward_choice_id(info.battleStageId) == level
+        and battle_button_available(group.Btn_Restart) and type(open_retry) == 'function' then
+        panel.rows[2] = {id=level, index=2, disabled=false, selected=false, action='retry',
+            apply=function()
+                open_retry(nil, nil)
+                tracking.battle_retry_prompt = {level=level, result=result}
+                return 'submitted'
+            end}
+    end
     panel.ready = true
     return panel
 end
@@ -108,7 +163,9 @@ local function read_rest_settlement(url)
     for _,role in pairs(run.roles) do
         if role and (role.hp == nil or role.hp > 0) then available = available + 1 end
     end
-    if available >= 5 then return nil end
+    local interval_exit = tracking.interval_exit
+    local owned_exit = quit and interval_exit and interval_exit.rest == rest.self and interval_exit.id == rest_id
+    if available >= 5 and not owned_exit then return nil end
 
     local panel = {kind=main and 'rest_shortage' or 'rest_finish', ready=false, rows={}}
     local owner = UIManager:GetPanel(url)
@@ -128,7 +185,13 @@ local function read_rest_settlement(url)
             return panel
         end
         panel.identity = quit_view.self
-        panel.confirm = buttons and buttons.CubeRogueQuit_Group_Btn_Btn_Finish_Click
+        local finish = buttons and buttons.CubeRogueQuit_Group_Btn_Btn_Finish_Click
+        if type(finish) == 'function' then
+            panel.confirm = function()
+                finish(nil, nil)
+                tracking.interval_exit = nil
+            end
+        end
     end
     panel.subject_id = rest_id
     panel.rows = {{id=rest_id, index=1, disabled=false, selected=false}}
@@ -143,8 +206,8 @@ if network_busy() then
 end
 
 local url = UIManager and UIManager:GetCurrentPanelURL()
-local panel = read_formation_exit(url) or read_formation(url) or read_reward_choice(url)
-    or read_event_choice(url) or read_battle_result(url) or read_rest_settlement(url)
+local panel = read_formation_exit(url) or read_formation(url) or read_reward_choice(url) or read_rest_interval(url)
+    or read_gaming_shop(url) or read_event_choice(url) or read_battle_result(url) or read_rest_settlement(url)
 if not panel then
     tracking.identity = nil
     if command == 'read' then return {status='absent', kind='none'} end
@@ -155,25 +218,28 @@ end
 -- Only a revision number crosses the bridge. New panels with identical
 -- choices still have their own revision and one-shot confirmation.
 if panel.identity and (tracking.identity ~= panel.identity or tracking.kind ~= panel.kind
-        or tracking.subject ~= panel.subject_id) then
+        or tracking.subject ~= panel.subject_id or tracking.content ~= panel.content) then
     tracking.revision = (tracking.revision or 0) + 1
     tracking.identity = panel.identity
     tracking.kind = panel.kind
     tracking.subject = panel.subject_id
+    tracking.content = panel.content
     tracking.submitted = false
 end
 
 if command == 'read' then
     if not panel.ready then
         return {status='waiting', kind=panel.kind, reason=panel.reason, wait_reason=panel.wait_reason,
+                roster_detail=panel.roster_detail, boss_encounter=panel.boss_encounter,
                 subject_id=panel.kind == 'formation_start' and panel.subject_id or nil,
                 selected_count=panel.selected_count, available_count=panel.available_count,
-                required_count=panel.required_count}
+                required_count=panel.required_count, party=panel.party}
     end
     local status = tracking.submitted and 'submitted' or 'ready'
     return {status=status, kind=panel.kind, revision=tracking.revision,
             subject_id=panel.subject_id, rows=panel.rows, selected_count=panel.selected_count,
-            available_count=panel.available_count, required_count=panel.required_count}
+            available_count=panel.available_count, required_count=panel.required_count,
+            party=panel.party, roster=panel.roster, balance=panel.balance, boss_encounter=panel.boss_encounter}
 end
 if panel.kind ~= kind or tracking.revision ~= revision or panel.subject_id ~= subject then
     return {status='changed'}
@@ -181,7 +247,13 @@ end
 if not panel.ready or tracking.submitted then return {status='waiting'} end
 local row = panel.rows[index]
 if not row or row.index ~= index or row.id ~= id or row.disabled then return {status='changed'} end
+if row.action and command == 'confirm' then
+    local status = row.apply()
+    if status == 'submitted' then tracking.submitted = true end
+    return {status=status}
+end
 local direct_confirm = kind == 'battle_defeat' or kind == 'battle_victory'
+    or kind == 'battle_retry_confirm'
     or kind == 'rest_shortage' or kind == 'rest_finish'
     or kind == 'formation_fill' or kind == 'formation_start' or kind == 'formation_leave'
     or kind == 'formation_quit' or kind == 'formation_finish'

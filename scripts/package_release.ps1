@@ -172,6 +172,7 @@ try {
     $archives = @{}
     if ($profiles -contains "cpu" -or $profiles -contains "gpu") {
         & (Join-Path $repoRoot "tools/native/wgc_hdr/build.ps1")
+        & (Join-Path $repoRoot "tools/native/deep_dive_solver/build.ps1")
     }
 
     foreach ($selectedProfile in $profiles) {

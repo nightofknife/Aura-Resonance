@@ -66,7 +66,9 @@ def test_planned_run_uses_its_safety_limit_and_consumes_progress_snapshot(window
     window.requestRunPcTask.connect(lambda *args: calls.append(args))
     panel.planned_run_button.click()
     assert calls[0][0] == PC_CONSCIOUSNESS_DEEP_DIVE_PLANNED_RUN_TASK_REF
-    assert calls[0][1] == {"safety_round_limit": 19}
+    assert calls[0][1] == {"safety_round_limit": 19, "interval_policy": panel.interval_settings.policy(),
+                            "battle_retry_limit": 0, "shop_policy": panel.shop_settings.policy(),
+                            "event_option_policy": []}
     assert calls[0][3] == 0.0
     window._active_game_name = PC_GAME_NAME
     window._on_run_updated({"user_data": {"deep_dive_planned_run": {

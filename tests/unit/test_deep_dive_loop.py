@@ -2,6 +2,7 @@ import asyncio
 import copy
 from pathlib import Path
 from types import SimpleNamespace
+import numpy as np
 import pytest
 import yaml
 from packages.aura_core.context.execution import ExecutionContext
@@ -10,6 +11,8 @@ from packages.aura_core.engine.execution_engine import ExecutionEngine
 from packages.aura_core.config.template import TemplateRenderer
 from plans.resonance_pc.src.actions import consciousness_deep_dive_loop_pc_actions as loop
 from plans.resonance_pc.src.actions import consciousness_deep_dive_pc_actions as entry
+from plans.resonance_pc.src.actions import consciousness_deep_dive_cleanup_pc_actions as cleanup
+from plans.resonance_pc.src.actions import _deep_dive_cleanup_vision as cleanup_vision
 from plans.resonance_pc.src.actions._deep_dive_opening_vision import OpeningChoice
 from plans.resonance_pc.src.actions._deep_dive_runtime_events import advance_context, create_context
 
@@ -23,10 +26,11 @@ class Store:
     async def get_all_data(self):return copy.deepcopy(self.data)
 
 
-def child(stage,ok=True):
-    p={'success':ok,'status':'completed' if ok else 'blocked','reason':'sample blocked',
+def child(stage, ok=True, *, outcome='victory', reason=None):
+    p={'success':ok,'status':'completed' if ok else 'blocked','reason':reason or ('settlement_observed' if ok else 'sample blocked'),
        'page_state':'deep_dive_board' if stage=='entry' else 'deep_dive_activity_home',
-       'terminal':'settlement','terminal_reached':ok,'outcome':'failure','game_success':False,
+       'terminal':'settlement','terminal_reached':ok,'outcome':outcome,
+       'game_success':{'victory':True,'failure':False}.get(outcome),
        'last_frame':'saved.png','turns_completed':6}
     return {{'entry':'deep_dive','single':'deep_dive_planned_run','cleanup':'deep_dive_cleanup'}[stage]:p}
 
@@ -37,16 +41,16 @@ def seed(count):
             'last_frame':'','last_result':{}}
 
 
-@pytest.mark.parametrize('value',[0,-2,1.5,True,'2',None])
+@pytest.mark.parametrize('value',[-1,-2,1.5,True,'2',None,float('nan'),float('inf')])
 def test_invalid_count(value):
     with pytest.raises(ValueError):loop.validate_count(value)
 
 
-@pytest.mark.parametrize('count',[1,2,-1])
+@pytest.mark.parametrize('count',[1,2,0])
 def test_cycles_count_after_cleanup_only(count):
     async def run():
-        store=Store();await store.set('test',seed(count))
-        for i in range(2 if count==-1 else count):
+        store=Store();await store.set('test',seed(loop.validate_count(count)))
+        for i in range(count or 2):
             await loop.begin_loop_run('test',state_store=store)
             for stage in ['entry','single']:
                 await loop.checkpoint_loop('test',stage,child(stage),state_store=store)
@@ -54,14 +58,28 @@ def test_cycles_count_after_cleanup_only(count):
             await loop.checkpoint_loop('test','cleanup',child('cleanup'),state_store=store)
             assert (await store.get('test'))['completed_runs']==i+1
         result=await loop.loop_result('test',state_store=store)
-        assert result['status']==('running' if count==-1 else 'completed')
+        assert result['status']==('running' if count==0 else 'completed')
+        assert result['loop_count'] == count
+    asyncio.run(run())
+
+
+def test_existing_unlimited_session_uses_zero_in_status():
+    async def run():
+        store = Store()
+        await store.set('test', seed(-1))
+        result = await loop.loop_result('test', state_store=store)
+        assert result['loop_count'] == 0
+        assert result['count_failed_runs'] is False
+        assert result['status'] == 'running'
+
     asyncio.run(run())
 
 
 @pytest.mark.parametrize('failed_stage',['entry','single','cleanup'])
 def test_business_blocked_stops_without_count(failed_stage):
     async def run():
-        store=Store();await store.set('test',seed(-1));await loop.begin_loop_run('test',state_store=store)
+        store=Store();await store.set('test',dict(seed(0), count_failed_runs=True))
+        await loop.begin_loop_run('test',state_store=store)
         for stage in ['entry','single','cleanup']:
             r=await loop.checkpoint_loop('test',stage,child(stage,stage!=failed_stage),state_store=store)
             if stage==failed_stage:
@@ -72,10 +90,87 @@ def test_business_blocked_stops_without_count(failed_stage):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('record_failures,outcome,reason,expected', [
+    (False, 'unknown', 'settlement_observed', 0),
+    (True, 'unknown', 'settlement_observed', 0),
+    (False, 'victory', 'fixed_party_unrecoverable_settled', 0),
+    (True, 'unknown', 'interval_shortage_settled', 1),
+])
+def test_settlement_without_normal_win_or_loss(record_failures, outcome, reason, expected):
+    async def run():
+        store = Store()
+        await store.set('test', dict(seed(1), count_failed_runs=record_failures))
+        await loop.begin_loop_run('test', state_store=store)
+        await loop.checkpoint_loop('test', 'entry', child('entry'), state_store=store)
+        await loop.checkpoint_loop('test', 'single', child('single', outcome=outcome, reason=reason), state_store=store)
+        await loop.checkpoint_loop('test', 'cleanup', child('cleanup'), state_store=store)
+        result = await loop.loop_result('test', state_store=store)
+        assert result['completed_runs'] == expected
+        assert result['status'] == ('completed' if expected else 'running')
+
+    asyncio.run(run())
+
+
 def test_schema_completion_not_framework_success():
     assert loop.child_output('single',{'status':'SUCCESS'})=={}
     assert not loop.successful('single',{})
     assert not loop.successful('cleanup',{'success':True,'status':'completed','page_state':'deep_dive_board'})
+
+
+def card_pack_frame(*anchors):
+    frame = np.full((720, 1280, 3), 25, np.uint8)
+    for name in anchors:
+        template = cleanup_vision.template(name)
+        x, y, _, _ = cleanup_vision.REGIONS[name]
+        h, w = template.shape
+        frame[y:y + h, x:x + w] = template[..., None]
+    return frame
+
+
+@pytest.mark.parametrize('anchor', ['card_pack_swipe_prompt', 'card_pack_deep_dive_logo'])
+def test_card_pack_needs_both_swipe_prompt_and_logo(anchor):
+    assert cleanup_vision.observe(card_pack_frame(anchor))['scene'] != 'card_pack'
+
+
+def test_card_pack_ends_cleanup_and_unlimited_loop_without_clicking(tmp_path, monkeypatch):
+    screenshot = card_pack_frame('card_pack_swipe_prompt', 'card_pack_deep_dive_logo')
+    app = SimpleNamespace(capture=lambda: SimpleNamespace(success=True, image=screenshot))
+    clicks = []
+
+    async def pause(_):
+        pass
+
+    monkeypatch.setattr(cleanup, 'resolve_base_path', lambda: tmp_path)
+    monkeypatch.setattr(cleanup, 'aura_click', lambda **kwargs: clicks.append(kwargs))
+    monkeypatch.setattr(cleanup.asyncio, 'sleep', pause)
+
+    async def run():
+        store = Store()
+        key = (await cleanup.initialize_cleanup(state_store=store))['session_key']
+        state = await store.get(key)
+        state['pending'] = {'scene': 'settlement_details', 'at': state['progress_at'], 'clicks': 1}
+        await store.set(key, state)
+        first = await cleanup.advance_cleanup(key, app, store)
+        assert first == {'status': 'running', 'scene': 'card_pack', 'action': 'wait'}
+        second = await cleanup.advance_cleanup(key, app, store)
+        assert second == {'status': 'blocked', 'scene': 'card_pack', 'action': 'blocked'}
+        result = await cleanup.finish_cleanup(key, store)
+        assert not result['success']
+        assert result['reason_code'] == 'deep_dive_card_pack_requires_manual_open'
+        assert Path(result['last_frame']).is_file()
+        assert not clicks
+
+        await store.set('test', dict(seed(0), stage='cleanup', run_index=1))
+        child_result = {'session_key': key, 'deep_dive_cleanup': result}
+        await loop.checkpoint_loop('test', 'cleanup', child_result, state_store=store)
+        outcome = await loop.loop_result('test', state_store=store)
+        assert outcome['status'] == 'blocked' and outcome['completed_runs'] == 0
+        assert '手动滑动开启' in outcome['reason']
+        assert outcome['reason_code'] == result['reason_code']
+        assert outcome['last_frame'] == result['last_frame']
+        assert not (await loop.begin_loop_run('test', state_store=store))['ok']
+
+    asyncio.run(run())
 
 
 def test_entry_reveals_and_selects_depth_one_from_depth_seven(monkeypatch):
@@ -123,6 +218,45 @@ def test_entry_reveals_and_selects_depth_one_from_depth_seven(monkeypatch):
     assert result['dive_depth'] == 1 and result['selected_center'] == center
     assert result['drag_attempts'] == len(gestures) == 2
     assert clicks == [center, start_button]
+
+
+@pytest.mark.parametrize("depth", [6, 7])
+@pytest.mark.parametrize("locked", [False, True])
+def test_entry_reveals_high_depth_and_respects_the_game_lock(monkeypatch, depth, locked):
+    target = (773, 431) if depth == 6 else (992, 212)
+    start_button = (1065, 640)
+    drags = []
+    clicks = []
+    selected_reads = []
+
+    async def opening_frame(_):
+        if not drags:
+            choices = {5: OpeningChoice((901, 212), "selected")}
+        else:
+            state = "selected" if clicks else "available"
+            choices = {depth: OpeningChoice(target, "locked" if locked else state)}
+            if state == "selected":
+                selected_reads.append(target)
+        return SimpleNamespace(depth_page=lambda: True, depths=lambda: choices, start_game=lambda: start_button)
+
+    async def pause(_):
+        pass
+
+    monkeypatch.setattr(entry, "_opening_frame", opening_frame)
+    monkeypatch.setattr(entry, "aura_sleep", pause)
+    monkeypatch.setattr(entry, "aura_drag", lambda *, start_x, end_x, **_: drags.append((start_x, end_x)))
+    monkeypatch.setattr(entry, "aura_click", lambda *, x, y, **_: clicks.append((x, y)))
+    assert entry.validate_opening_options(depth, "source") == (depth, "source")
+    if locked:
+        with pytest.raises(entry.ConsciousnessDeepDiveError, match="尚未解锁"):
+            asyncio.run(entry._start_at_depth(None, depth))
+        assert not clicks
+    else:
+        result = asyncio.run(entry._start_at_depth(None, depth))
+        assert result["dive_depth"] == depth and result["selected_center"] == target
+        assert clicks == [target, start_button]
+        assert len(selected_reads) == 2
+    assert len(drags) == 1 and drags[0][0] > drags[0][1]
 
 
 def test_entry_switches_strategy_even_if_confirm_is_already_visible(monkeypatch):
@@ -272,7 +406,13 @@ def test_yaml_stages_and_termination_contract():
     assert outer['cycles']['loop']['retain_last']==1 and outer['cycles']['timeout']==-1
     stages=tasks['deep_dive_cycle_pc']['steps']
     assert stages['single']['params']['task_ref'].endswith(':consciousness_deep_dive_planned_run_pc')
-    assert stages['single']['params']['inputs']=={'planning_time_budget_sec':180}
+    assert stages['single']['params']['inputs']=={
+        'planning_time_budget_sec':0.35,
+        'interval_policy': '{{ state[inputs.session_key].interval_policy | default({}) }}',
+        'battle_retry_limit': '{{ state[inputs.session_key].battle_retry_limit | default(0) }}',
+        'shop_policy': '{{ state[inputs.session_key].shop_policy | default({}) }}',
+        'event_option_policy': '{{ state[inputs.session_key].event_option_policy | default([]) }}',
+    }
     for stage in ['entry','single','cleanup']:
         assert stages[stage]['action']=='aura.run_task'
         assert "status == 'running'" in stages[stage]['when']
@@ -321,7 +461,8 @@ def test_real_cycle_dag_skips_later_children_on_business_failure(failed_stage):
     asyncio.run(run())
 
 
-def test_full_outer_dag_runs_exactly_two_complete_cycles():
+@pytest.mark.parametrize('count,record_failures,attempts', [(2, False, 3), (2, True, 2), (0, False, 4), (0, True, 3)])
+def test_full_outer_dag_stops_at_finite_count_or_blocked_cycle(count, record_failures, attempts):
     root=Path(__file__).resolve().parents[2]
     tasks=yaml.safe_load((root/'plans/resonance_pc/tasks/consciousness_deep_dive_loop_pc.yaml').read_text(encoding='utf8'))
     async def run():
@@ -334,6 +475,7 @@ def test_full_outer_dag_runs_exactly_two_complete_cycles():
                 if name in {'resonance_pc.require_deep_dive_bridge', 'resonance_pc.require_client_resolution'}:return True
                 if name.endswith('loop_initialize'):
                     await store.set('test',dict(seed(params['loop_count']),
+                        count_failed_runs=params['count_failed_runs'],
                         dive_depth=params['dive_depth'], opening_strategy=params['opening_strategy']))
                     return {'session_key':'test','status':'running'}
                 if name=='aura.run_task':
@@ -343,18 +485,23 @@ def test_full_outer_dag_runs_exactly_two_complete_cycles():
                     stage='cleanup' if 'cleanup' in ref else 'single' if 'planned_run' in ref else 'entry'
                     if stage == 'entry':
                         entry_inputs.append(params['inputs'])
-                    calls.append(stage);return child(stage)
+                    calls.append(stage)
+                    return child(stage, not (count == 0 and stage == 'cleanup' and len(entry_inputs) == attempts),
+                                 outcome='failure' if len(entry_inputs) == 1 else 'victory')
                 if name.endswith('loop_begin'):return await loop.begin_loop_run(**params,state_store=store)
                 if name.endswith('loop_checkpoint'):return await loop.checkpoint_loop(**params,state_store=store)
                 return await loop.loop_result(**params,state_store=store)
             engine.node_executor.execute_single_action=execute
             return await engine.run(tasks[key],key,ExecutionContext(inputs=inputs))
         context=await run_task('consciousness_deep_dive_loop_pc',
-                               {'loop_count':2,'dive_depth':2,'opening_strategy':'revival'})
+                               {'loop_count':count,'count_failed_runs':record_failures,
+                                'dive_depth':7,'opening_strategy':'revival'})
         result=context.data['nodes']['finish']['output']
-        assert result['success'] and result['completed_runs']==2
-        assert calls==['entry','single','cleanup']*2
-        assert entry_inputs==[{'dive_depth':2,'opening_strategy':'revival'}]*2
+        assert result['status'] == ('completed' if count else 'blocked')
+        assert result['completed_runs'] == 2
+        assert result['count_failed_runs'] is record_failures
+        assert calls==['entry','single','cleanup']*attempts
+        assert entry_inputs==[{'dive_depth':7,'opening_strategy':'revival'}]*attempts
         assert len(context.data['nodes']['cycles']['output'])==1
         assert await store.get('test') is None
     asyncio.run(run())

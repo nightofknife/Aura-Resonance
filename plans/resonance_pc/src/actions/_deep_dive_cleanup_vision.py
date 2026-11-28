@@ -1,4 +1,4 @@
-"""Read-only classification of settlement summary/details and activity home."""
+"""Read-only classification of settlement pages, card packs and activity home."""
 from functools import lru_cache
 from pathlib import Path
 import cv2
@@ -9,7 +9,9 @@ from ._deep_dive_planned_run_vision import _match as _match_native_title
 ROOT=Path(__file__).resolve().parents[2]/'templates/deep_dive/deep_dive_cleanup'
 REGIONS={'settlement_title':(480,45,810,160),'continue':(525,605,760,695),
          'confirm':(525,600,780,695),'activity_title':(480,35,825,195),
-         'start_dive':(530,500,765,615)}
+         'start_dive':(530,500,765,615),
+         'card_pack_swipe_prompt':(520,103,760,181),
+         'card_pack_deep_dive_logo':(505,438,775,570)}
 
 
 @lru_cache(None)
@@ -32,6 +34,8 @@ def observe(rgb):
         _,score,_,(px,py)=cv2.minMaxLoc(r)
         scores[name]=float(score);points[name]=[x+px+ref.shape[1]//2,y+py+ref.shape[0]//2]
     result={'valid':True,'scene':'unknown','scores':scores}
+    if scores['card_pack_swipe_prompt'] >= .88 and scores['card_pack_deep_dive_logo'] >= .85:
+        return {**result, 'scene': 'card_pack'}
     if scores['activity_title']>=.85 and scores['start_dive']>=.86:
         return {**result,'scene':'activity_home'}
     details = scores['confirm'] >= .87 and scores['continue'] < .8

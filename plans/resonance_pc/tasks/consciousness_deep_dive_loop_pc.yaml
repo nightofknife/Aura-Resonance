@@ -3,16 +3,88 @@ consciousness_deep_dive_loop_pc:
     role: user_task
     domain: 活动玩法
     title: 识海深潜循环（PC）
-    description: 从活动首页按所选深度和开局策略下潜，通过桥接器执行规划，结算后返回活动首页。组队补不满时结算并重开，该次不计入循环次数。循环次数为 -1 时持续运行。
+    description: 从活动首页按所选深度和开局策略下潜，通过桥接器执行规划，结算后返回活动首页。默认只计入成功局，可选择同时计入失败局。循环次数为 0 时持续运行。
     entry_point: true
     inputs:
-      - {name: loop_count, type: number, default: 1, min: -1}
-      - {name: dive_depth, type: number, default: 1, strict_integer: true, min: 1, max: 5}
+      - {name: loop_count, type: number, default: 1, strict_integer: true, min: 0}
+      - {name: count_failed_runs, type: boolean, default: false}
+      - {name: dive_depth, type: number, default: 1, strict_integer: true, min: 1, max: 7}
       - {name: opening_strategy, type: enum, default: source, enum: [source, waxing_waning, revival, defense]}
+      - name: interval_policy
+        type: dict
+        default: {}
+        properties:
+          order:
+            name: order
+            type: list
+            count: 4
+            item: {name: operation, type: enum, enum: [revive, intensify, awake, recruit]}
+          revive:
+            name: revive
+            type: dict
+            properties:
+              enabled: {name: enabled, type: boolean}
+              limit: {name: limit, type: number, strict_integer: true, min: 0, max: 2147483647}
+          intensify:
+            name: intensify
+            type: dict
+            properties:
+              enabled: {name: enabled, type: boolean}
+              limit: {name: limit, type: number, strict_integer: true, min: 0, max: 2147483647}
+              recommended_only: {name: recommended_only, type: boolean}
+              order: {name: order, type: enum, enum: [low, high]}
+          awake:
+            name: awake
+            type: dict
+            properties:
+              enabled: {name: enabled, type: boolean}
+              limit: {name: limit, type: number, strict_integer: true, min: 0, max: 2147483647}
+              mode: {name: mode, type: enum, enum: [focused, even]}
+              max_level: {name: max_level, type: number, strict_integer: true, min: 1, max: 5}
+          recruit:
+            name: recruit
+            type: dict
+            properties:
+              enabled: {name: enabled, type: boolean}
+              limit: {name: limit, type: number, strict_integer: true, min: 0, max: 2147483647}
+              order: {name: order, type: enum, enum: [low, high]}
+          fill_party: {name: fill_party, type: boolean}
+          fixed_party: {name: fixed_party, type: boolean}
+      - {name: battle_retry_limit, type: number, default: 0, strict_integer: true, min: 0}
+      - name: shop_policy
+        type: dict
+        default: {}
+        properties:
+          enabled: {name: enabled, type: boolean}
+          recommended_only: {name: recommended_only, type: boolean}
+          order: {name: order, type: enum, enum: [low, high]}
+          limit: {name: limit, type: number, strict_integer: true, min: 0, max: 2147483647}
+      - name: event_option_policy
+        type: list
+        default: []
+        item:
+          name: event
+          type: dict
+          properties:
+            name: {name: name, type: string, required: true}
+            order:
+              name: order
+              type: list
+              item: {name: option_id, type: number, strict_integer: true, min: 1, max: 2147483647}
+            disabled:
+              name: disabled
+              type: list
+              item: {name: option_id, type: number, strict_integer: true, min: 1, max: 2147483647}
   steps:
     require_bridge:
       action: resonance_pc.require_deep_dive_bridge
-      params: {require_turn: true, require_actions: true, require_choices: true}
+      params:
+        require_turn: true
+        require_actions: true
+        require_choices: true
+        require_interval: true
+        require_battle_retry: "{{ inputs.battle_retry_limit > 0 }}"
+        require_shop: "{{ inputs.shop_policy.enabled | default(true) }}"
     require_resolution:
       depends_on: require_bridge
       action: resonance_pc.require_client_resolution
@@ -21,8 +93,13 @@ consciousness_deep_dive_loop_pc:
       depends_on: require_resolution
       params:
         loop_count: "{{ inputs.loop_count }}"
+        count_failed_runs: "{{ inputs.count_failed_runs | default(false) }}"
         dive_depth: "{{ inputs.dive_depth | default(1) }}"
         opening_strategy: "{{ inputs.opening_strategy | default('source') }}"
+        interval_policy: "{{ inputs.interval_policy | default({}) }}"
+        battle_retry_limit: "{{ inputs.battle_retry_limit | default(0) }}"
+        shop_policy: "{{ inputs.shop_policy | default({}) }}"
+        event_option_policy: "{{ inputs.event_option_policy | default([]) }}"
     cycles:
       action: aura.run_task
       timeout: -1
@@ -80,7 +157,12 @@ deep_dive_cycle_pc:
       when: "{{ state[inputs.session_key].status == 'running' }}"
       params:
         task_ref: tasks:consciousness_deep_dive_planned_run_pc.yaml:consciousness_deep_dive_planned_run_pc
-        inputs: {planning_time_budget_sec: 180}
+        inputs:
+          planning_time_budget_sec: 0.35
+          interval_policy: "{{ state[inputs.session_key].interval_policy | default({}) }}"
+          battle_retry_limit: "{{ state[inputs.session_key].battle_retry_limit | default(0) }}"
+          shop_policy: "{{ state[inputs.session_key].shop_policy | default({}) }}"
+          event_option_policy: "{{ state[inputs.session_key].event_option_policy | default([]) }}"
     check_single:
       action: resonance_pc.deep_dive_loop_checkpoint
       depends_on: {single: "success|skipped"}

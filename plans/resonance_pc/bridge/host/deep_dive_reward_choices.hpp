@@ -47,12 +47,24 @@ local function read_reward_choice(url)
         local selected_id = #selected == 1 and reward_choice_id(selected[1]) or nil
         if #selected == 1 and not selected_id then return panel end
 
+        local cache = PlayerData and PlayerData.TempCache
+        local run = cache and cache.CubeRogueData
+        local team = mode == 3 and run and run.team or nil
         local rows, seen = {}, {}
         for index=1,#data do
             local id = type(data[index]) == 'table' and reward_choice_id(data[index].id)
             if not id or seen[id] then return panel end
             seen[id] = true
-            rows[index] = {id=id, index=index, disabled=false, selected=id == selected_id}
+            local row = {id=id, index=index, disabled=false, selected=id == selected_id}
+            -- UIItemSelectionViewFunction shows Img_Recommend when the
+            -- buff's correspondingTeam matches the active strategy.
+            if team ~= nil and type(GetCA) == 'function' then
+                local buff = GetCA(id, 'RogueBuffFactory')
+                if buff and buff.correspondingTeam ~= nil then
+                    row.recommended = team == tostring(buff.correspondingTeam)
+                end
+            end
+            rows[index] = row
         end
         if selected_id and not seen[selected_id] then return panel end
         panel.identity = data
@@ -102,7 +114,8 @@ local function apply_reward_choice(panel, command, row)
     end
     if panel.kind ~= 'cards' or not panel.ready then return 'waiting' end
     for _, current in ipairs(panel.rows) do
-        if current.selected and current.id ~= row.id then return 'waiting' end
+        if current.selected and current.id ~= row.id
+            and (command ~= 'select' or not row.recommended) then return 'waiting' end
     end
     if command == 'select' then
         if row.selected then return 'applied' end

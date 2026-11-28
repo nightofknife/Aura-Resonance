@@ -1,6 +1,9 @@
 """Translate the client's event choice panels into the existing event policies."""
 from functools import lru_cache
 
+from packages.resonance_shared.deep_dive_event_options import supports_native_event_option
+from packages.resonance_shared.deep_dive_interval import INTERVAL_PANELS
+
 from ._deep_dive_event_vision import catalog as healing_catalog
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT
 from ._deep_dive_vortex_vision import catalog as vortex_catalog
@@ -21,7 +24,7 @@ def _policy(event_type):
     if catalog is None:
         return {}, {}
     data = catalog()
-    return ({event['id']: set(event['options']) for event in data['events']},
+    return ({event['id']: event for event in data['events']},
             {option['id']: option for option in data['options']})
 
 
@@ -37,6 +40,8 @@ def observe_choice(observation, snapshot, event_type):
     subject_id = snapshot['subject_id'] if status == 'ready' else snapshot.get('subject_id')
     if kind in FORMATION_KINDS and type(subject_id) is int and subject_id > 0:
         current['formation_level_id'] = subject_id
+        if snapshot.get('boss_encounter') is True:
+            current['formation_boss_encounter'] = True
     wait_reason = snapshot.get('wait_reason')
     visual_formation = observation.get('scene') == 'battle_formation' and (
         kind == 'none' or kind in FORMATION_KINDS or wait_reason == 'network_busy')
@@ -44,8 +49,19 @@ def observe_choice(observation, snapshot, event_type):
               if key in snapshot}
     if status == 'waiting':
         current['native_wait_reason'] = wait_reason
+        if wait_reason == 'formation_roster_unavailable' and isinstance(snapshot.get('roster_detail'), str):
+            current['formation_roster_detail'] = snapshot['roster_detail']
         if 'formation_level_id' in current or visual_formation:
             current.update(formation_seen=True, formation=counts)
+    if kind in INTERVAL_PANELS and status in {'ready', 'submitted'}:
+        return dict(current, scene='rest_area' if kind == 'rest_main' else 'rest_service',
+                    interval=snapshot)
+    if kind == 'shop':
+        if status == 'waiting':
+            if wait_reason != 'network_busy' and observation.get('scene') == 'shop':
+                return dict(current, scene='shop', click=observation.get('click'))
+            return current
+        return dict(current, scene='shop', shop=snapshot)
     if status != 'ready':
         return current
 
@@ -55,24 +71,39 @@ def observe_choice(observation, snapshot, event_type):
                      index=row['index'], id=row['id']) for row in rows]
     if kind == 'replacement':
         return dict(current, scene=ITEM_REPLACEMENT, native=controls[0])
-    if kind in {'battle_defeat', 'battle_victory'}:
+    if kind == 'battle_defeat':
+        retry = next((control for row, control in zip(rows, controls)
+                      if row.get('action') == 'retry' and not row['disabled']), None)
+        return dict(current, scene=kind, native=controls[0], battle_retry=retry)
+    if kind == 'shop_feedback':
+        return dict(current, scene='reward_obtained', native=controls[0])
+    if kind in {'battle_victory', 'battle_retry_confirm'}:
         return dict(current, scene=kind, native=controls[0])
     if kind in FORMATION_KINDS:
-        return dict(current, scene='battle_formation', native=controls[0], formation=counts)
+        return dict(current, scene='battle_formation', native=controls[0], formation=counts,
+                    battle_party=snapshot.get('party'))
     if kind in {'formation_quit', 'formation_finish'}:
         return dict(current, scene=kind, native=controls[0])
     if kind in {'rest_shortage', 'rest_finish'}:
         return dict(current, scene='rest_area' if kind == 'rest_shortage' else 'rest_finish', native=controls[0])
     if kind == 'cards':
-        cards = [dict(native=control, selected=row['selected']) for row, control in zip(rows, controls)]
+        cards = [dict(native=control, selected=row['selected'], recommended=row.get('recommended') is True)
+                 for row, control in zip(rows, controls)]
         return dict(current, scene='event_card_selection', cards=cards)
 
     events, options = _policy(event_type)
-    allowed = events.get(subject_id, set())
-    if not allowed or any(row['id'] not in allowed or row['id'] not in options for row in rows):
+    event = events.get(subject_id)
+    if not event or any(row['id'] not in event['options'] or row['id'] not in options for row in rows):
         return dict(current, native_choice_reason=f'unknown_native_event_options:{subject_id}')
     event_options = []
     for row, control in zip(rows, controls):
         state = 'disabled' if row['disabled'] else 'selected' if row['selected'] else 'normal'
-        event_options.append(dict(options[row['id']], state=state, native=control))
-    return dict(current, scene='event_options', event_options=event_options)
+        option = dict(options[row['id']], state=state, native=control)
+        followup = events.get(option.get('next_event_id'))
+        if followup:
+            option['supported_followup_options'] = [
+                id_ for id_ in followup['options'] if supports_native_event_option(options[id_])
+            ]
+        event_options.append(option)
+    return dict(current, scene='event_options', event_options=event_options,
+                event_option_name=event['name'], event_option_id=subject_id)

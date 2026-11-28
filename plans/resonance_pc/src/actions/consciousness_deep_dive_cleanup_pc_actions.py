@@ -24,14 +24,22 @@ def cancel_check():
 
 def step(state,o,now):
     if state['status']!='running':return 'finished',None
+    scene = o['scene'] if o.get('valid') else None
+    if scene is None:
+        state['stable'] = 0
+    elif scene == state.get('last_scene'):
+        state['stable'] += 1
+    else:
+        state.update(last_scene=scene, stable=1)
+    if scene == 'card_pack' and state['stable'] >= 2:
+        state.update(status='blocked', page_state='deep_dive_card_pack',
+                     reason='识海深潜卡包需要手动滑动开启，任务已停止。',
+                     reason_code='deep_dive_card_pack_requires_manual_open')
+        state['trace'].append({'blocked': scene, 'at': now})
+        return 'blocked', None
     if now-state['progress_at']>=30:
         state.update(status='blocked',reason='收尾页面30秒未得到可确认的进展')
         return 'blocked',None
-    if not o.get('valid'):
-        state['stable']=0;return 'wait',None
-    scene=o['scene']
-    if scene==state.get('last_scene'):state['stable']+=1
-    else:state['last_scene']=scene;state['stable']=1
     if state['stable']<2:return 'wait',None
     if scene=='activity_home':
         state.update(status='completed',page_state='deep_dive_activity_home')
@@ -113,4 +121,5 @@ async def finish_cleanup(session_key:str,state_store=None):
         raise RuntimeError('收尾会话不存在')
     return {'success':state['status']=='completed','status':state['status'],
             'page_state':state['page_state'],'reason':state['reason'],
+            'reason_code':state.get('reason_code',''),
             'last_frame':state['last_frame'],'trace':state['trace']}

@@ -1,5 +1,6 @@
 """Carry the identity of a client choice through selection and confirmation."""
 import math
+import random
 
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT, result_changed
 
@@ -13,7 +14,8 @@ def choice_signature(observation):
     return [observation['scene'],
             [[r['group'], r['state'], native_key(r.get('native'))]
              for r in observation.get('event_options', [])],
-            [[native_key(r['native']) if 'native' in r else round(r['point'][0] / 10), r['selected']]
+            [[native_key(r['native']) if 'native' in r else round(r['point'][0] / 10),
+              r['selected'], r.get('recommended', False)]
              for r in observation.get('cards', [])], native_key(observation.get('native'))]
 
 
@@ -52,6 +54,11 @@ def ordered_cards(rows):
     return sorted(rows, key=lambda row: row['point'][0])
 
 
+def preferred_card(cards):
+    recommended = [card for card in cards if card.get('recommended') is True]
+    return random.choice(recommended) if recommended else cards[1 if len(cards) == 3 else 0]
+
+
 def matching_card(rows, pending):
     if 'native' in pending:
         return next((row for row in rows if same_choice(row, pending)), None)
@@ -72,4 +79,7 @@ def result_progress(pending, observation):
     if observation['scene'] == ITEM_REPLACEMENT and pending.get('native', {}).get('kind') == 'replacement':
         current = observation.get('native')
         return current is not None and current['revision'] != pending['native']['revision']
+    current = observation.get('native')
+    if pending.get('native', {}).get('kind') == 'shop_feedback' and current is not None:
+        return current['revision'] != pending['native']['revision']
     return result_changed(pending.get('result_scene'), pending.get('visual'), observation)

@@ -5,7 +5,7 @@ from numbers import Real
 
 DEFAULT_DIVE_DEPTH = 1
 DEFAULT_OPENING_STRATEGY = 'source'
-DIVE_DEPTHS = ('Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ')
+DIVE_DEPTHS = ('Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ')
 OPENING_STRATEGIES = {
     'source': '源流之策',
     'waxing_waning': '盈缺之策',
@@ -17,7 +17,7 @@ OPENING_STRATEGIES = {
 def validate_opening_options(dive_depth: int, opening_strategy: str) -> tuple[int, str]:
     if (isinstance(dive_depth, bool) or not isinstance(dive_depth, Real)
             or dive_depth not in range(1, len(DIVE_DEPTHS) + 1)):
-        raise ValueError('下潜深度必须为 Ⅰ 至 Ⅴ。')
+        raise ValueError(f'下潜深度必须为 {DIVE_DEPTHS[0]} 至 {DIVE_DEPTHS[-1]}。')
     if not isinstance(opening_strategy, str) or opening_strategy not in OPENING_STRATEGIES:
         raise ValueError('开局策略必须为源流之策、盈缺之策、回生之策或捍卫之策。')
     return int(dive_depth), opening_strategy

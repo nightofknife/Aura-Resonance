@@ -91,7 +91,7 @@ def test_native_move_requires_the_actual_selected_destination(selected_col, expe
 @pytest.mark.parametrize('title_confirmed', [True, False])
 def test_native_boss_move_rechecks_the_title_on_the_fresh_card(monkeypatch, title_confirmed):
     action = dict(action_id='move', target_occupant='singularity', phase='move_selection_wait',
-                  before_hud={'rotations_used': 1})
+                  before_hud=dict(moves_used=0, moves_total=1, rotations_used=1, rotations_total=1))
     state = dict(layout={'coordinate_frame': 'native_board'}, pending_action=action, event_stack=[])
     earlier_card = dict(scene='event_entry', event_type='boss_battle', click=[1086, 542])
     fresh_frame = object()

@@ -17,6 +17,8 @@ from packages.resonance_gui.logic import (
     extract_deep_dive_scan_result, extract_deep_dive_plan_result,
     extract_deep_dive_planned_run_result,
 )
+from packages.resonance_shared.deep_dive_interval import default_interval_policy
+from packages.resonance_shared.deep_dive_shop import normalize_shop_policy
 
 DEVELOPER_ROWS = [{"role": "developer", "task_ref": ref} for ref in (
     PC_CONSCIOUSNESS_DEEP_DIVE_SCAN_TASK_REF, PC_CONSCIOUSNESS_DEEP_DIVE_PLAN_TASK_REF,
@@ -109,8 +111,15 @@ def test_first_planned_run_without_developer_page(window, runner_status, termina
     window.requestCancelCurrent.connect(lambda: cancels.append(True))
     panel.planned_run_safety_limit_spin.setValue(17)
     panel.planned_run_button.click()
-    assert calls == [(PC_CONSCIOUSNESS_DEEP_DIVE_PLANNED_RUN_TASK_REF,
-                      {"safety_round_limit": 17}, "识海深潜关卡内自动运行", 0.0)]
+    expected_inputs = {
+        "safety_round_limit": 17,
+        "interval_policy": default_interval_policy(),
+        "shop_policy": normalize_shop_policy(),
+        "event_option_policy": [],
+        "battle_retry_limit": 0,
+    }
+    assert calls == [(PC_CONSCIOUSNESS_DEEP_DIVE_PLANNED_RUN_TASK_REF, expected_inputs,
+                      "识海深潜关卡内自动运行", 0.0)]
     assert page.deep_dive_developer_panel is None
     window._active_game_name = PC_GAME_NAME
     window._on_busy_changed(True)

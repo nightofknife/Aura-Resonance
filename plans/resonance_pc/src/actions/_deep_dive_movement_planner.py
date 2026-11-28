@@ -12,11 +12,13 @@ from ._deep_dive_chase_planner import plan_chase
 from ._deep_dive_inspiration_planner import (
     MAX_FREE_INSPIRATIONS, PlanningBudgetExceeded, PlanningCancelled, plan_inspiration,
 )
+from ._deep_dive_native_solver import get_native_solver
 from ._deep_dive_planner_rules import (
     cell_to_slot, coord_dict, geometry, remaining_player_actions, rules_version,
     validate_cube_size, validate_move_distance,
 )
 from ._deep_dive_target_readiness import is_targets_layout, required_cells, targets_readiness
+from ._deep_dive_realtime_planner import REALTIME_BUDGET_SEC, solve_realtime
 
 SCHEMA = "resonance_pc.deep_dive_plan.v1"
 ENCOUNTER_THEN_INSPIRATION = "encounter_then_inspiration"
@@ -94,10 +96,7 @@ def _layout_targets(layout: dict, *, allow_partial_turn: bool = False):
         if name not in phase:
             continue
         value = _integer(phase[name], name, 0)
-        if allow_partial_turn:
-            if value not in (0, 1):
-                raise ValueError("This version supports at most one remaining move and rotation")
-        elif value != 1:
+        if not allow_partial_turn and value != 1:
             raise ValueError("This version requires one move and one rotation")
     fingerprint = hashlib.sha256(json.dumps(
         sorted(fingerprint_cells), ensure_ascii=False, separators=(",", ":"),
@@ -162,7 +161,7 @@ def plan_layout(layout: dict, strategy: str = "chase", turn_budget: int = 6,
     cube_size, move_distance, player, boss, inspirations, fingerprint = _layout_targets(layout)
     size_description = "three-by-three" if cube_size == 3 else f"{cube_size}x{cube_size}"
     move_description = ("one adjacent same-face move" if move_distance == 1
-                        else "one same-face move of up to two steps")
+                        else f"one same-face move of up to {move_distance} steps")
     result = dict(schema=SCHEMA, strategy=strategy, turn_budget=turns,
                   cube_size=cube_size, move_distance=move_distance,
                   rules_version=rules_version(cube_size=cube_size, move_distance=move_distance),
@@ -176,8 +175,7 @@ def plan_layout(layout: dict, strategy: str = "chase", turn_budget: int = 6,
                   rule_assumptions=[
                       f"{size_description} cube; {move_description} and one layer rotation per turn",
                       "player may move then rotate or rotate then move",
-                      "same-face boss uniformly chooses a neighbour reducing Manhattan distance",
-                      "different-face boss uniformly chooses a same-face neighbour",
+                      "boss moves into the player if face-local adjacent, otherwise chooses a legal neighbour uniformly",
                       "boss rotates uniformly after movement, unless movement causes an encounter",
                       "all attached targets and nodes move with the selected layer",
                       "boss-consumed inspiration is not credited to the player or assumed recoverable",
@@ -251,7 +249,7 @@ def plan_layout(layout: dict, strategy: str = "chase", turn_budget: int = 6,
 def plan_current_state(layout: dict, strategy: str = "chase", rounds_remaining: int = 6,
                        moves_left: int = 1, rotations_left: int = 1, collected_count: int = 0,
                        *, time_budget_sec: float = 30., cancel_check=None,
-                       chase_objective: str = "min_expected_encounter_turns") -> dict:
+                       chase_objective: str = "min_expected_encounter_turns", realtime: bool = False) -> dict:
     """Plan from a fresh scan in the current turn, including already spent quotas.
 
     rounds_remaining includes this turn's enemy stage, even in the last round.
@@ -266,18 +264,24 @@ def plan_current_state(layout: dict, strategy: str = "chase", rounds_remaining: 
     likewise never expose an actionable next_action. Invalid inputs raise
     ValueError before search.
     """
-    started = time.monotonic()
+    clock = time.perf_counter if realtime else time.monotonic
+    started = clock()
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {', '.join(STRATEGIES)}")
-    rounds = _integer(rounds_remaining, "rounds_remaining", 0, 30)
-    moves = _integer(moves_left, "moves_left", 0, 1)
-    rotations = _integer(rotations_left, "rotations_left", 0, 1)
+    rounds = _integer(rounds_remaining, "rounds_remaining", 0, None if realtime else 30)
+    moves = _integer(moves_left, "moves_left", 0)
+    rotations = _integer(rotations_left, "rotations_left", 0)
     collected = _integer(collected_count, "collected_count", 0)
     if (not isinstance(time_budget_sec, Real) or isinstance(time_budget_sec, bool)
             or not math.isfinite(time_budget_sec) or time_budget_sec <= 0):
         raise ValueError("time_budget_sec must be positive and finite")
     if chase_objective not in ("min_expected_encounter_turns", "max_deadline_encounter_probability"):
         raise ValueError("Unsupported chase objective")
+    if realtime and strategy != ENCOUNTER_THEN_INSPIRATION:
+        raise ValueError("The realtime planner requires encounter_then_inspiration")
+    if not realtime and max(moves, rotations) > 1:
+        raise ValueError("Extra action quotas require realtime planning")
+    budget = min(float(time_budget_sec), REALTIME_BUDGET_SEC) if realtime else float(time_budget_sec)
     cube_size, move_distance, player, boss, inspirations, fingerprint = _layout_targets(
         layout, allow_partial_turn=True)
     phase = layout.get("planning_state", {})
@@ -309,7 +313,7 @@ def plan_current_state(layout: dict, strategy: str = "chase", rounds_remaining: 
     def checkpoint():
         if cancel_check is not None and cancel_check():
             raise PlanningCancelled("cancel_requested")
-        if time.monotonic() - started >= float(time_budget_sec):
+        if clock() - started >= budget:
             raise PlanningBudgetExceeded("planning_time_budget_exhausted")
 
     try:
@@ -319,8 +323,52 @@ def plan_current_state(layout: dict, strategy: str = "chase", rounds_remaining: 
         elif moves == rotations == 0:
             result.update(status="waiting_enemy", success=False, reason="current_player_quotas_exhausted")
         else:
-            remaining_time = float(time_budget_sec) - (time.monotonic() - started)
-            if moves == rotations == 1:
+            remaining_time = budget - (clock() - started)
+            if realtime:
+                turn = (layout.get("native_board") or {}).get("turn") or {}
+                future_distance = validate_move_distance(turn.get("base_move_distance", move_distance))
+                future_quotas = (_integer(turn.get("base_moves", 1), "base_moves", 0),
+                                 _integer(turn.get("base_rotations", 1), "base_rotations", 0))
+                enemy_quotas = (_integer(turn.get("boss_moves", 1), "boss_moves", 0, 1),
+                                _integer(turn.get("boss_rotations", 1), "boss_rotations", 0, 1))
+                calculated = None
+                # Preserve the original reward policy on bounded-size stock
+                # profiles. Leave enough time to return a quota-aware plan.
+                reward_round_limit = 11
+                if len(inspirations) == 2 and cube_size >= 4:
+                    if cube_size == 4:
+                        reward_round_limit = 8 if move_distance == 1 else 5
+                    else:
+                        reward_round_limit = 6 if move_distance == 1 else 0
+                if (budget >= .2 and rounds <= reward_round_limit and move_distance <= 2
+                        and max(moves, rotations) <= 1 and future_distance == move_distance
+                        and future_quotas == enemy_quotas == (1, 1) and get_native_solver() is not None):
+                    reward_deadline = started + min(.175, budget * .55)
+
+                    def reward_checkpoint():
+                        checkpoint()
+                        if clock() >= reward_deadline:
+                            raise PlanningBudgetExceeded("realtime_reward_budget_exhausted")
+
+                    try:
+                        reward_checkpoint()
+                        calculated = plan_inspiration(
+                            player, boss, inspirations, rounds, collected_count=collected,
+                            cancel_check=reward_checkpoint, time_budget_sec=budget,
+                            moves_left=moves, rotations_left=rotations, encounter_first=True,
+                            cube_size=cube_size, move_distance=move_distance,
+                        )
+                    except PlanningBudgetExceeded:
+                        pass
+                if calculated is None:
+                    calculated = solve_realtime(
+                        player, boss, inspirations, rounds, moves, rotations, collected,
+                        size=cube_size, move_distance=move_distance, future_distance=future_distance,
+                        future_quotas=future_quotas, enemy_quotas=enemy_quotas,
+                        finish_by=started + min(.240, budget * .84), checkpoint=checkpoint,
+                    )
+                result.update(calculated)
+            elif moves == rotations == 1:
                 calculated = plan_layout(layout, strategy=strategy, turn_budget=rounds,
                                          time_budget_sec=remaining_time, cancel_check=checkpoint,
                                          collected_count=collected, chase_objective=chase_objective)
@@ -359,7 +407,7 @@ def plan_current_state(layout: dict, strategy: str = "chase", rounds_remaining: 
         result.update(status="cancelled", success=False, reason="cancel_requested")
     except PlanningBudgetExceeded as error:
         result.update(status="search_budget_exhausted", success=False, reason=str(error))
-    result["computation_elapsed_sec"] = time.monotonic() - started
+    result["computation_elapsed_sec"] = clock() - started
     result["execution_mode"] = "planning_only"
     result["requires_observation_after_action"] = True
     if not result.get("success"):

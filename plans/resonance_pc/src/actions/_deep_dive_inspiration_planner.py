@@ -1,4 +1,4 @@
-"""Finite-horizon encounter and inspiration planning using NumPy.
+"""Finite-horizon encounter and inspiration planning.
 
 Inspiration yield is credited on branches that meet before the deadline.
 Actual pickups on other branches are tracked separately. Boss consumption
@@ -17,8 +17,9 @@ from typing import Callable
 import numpy as np
 
 from ._deep_dive_bounded_inspiration import bounded_reward_choice
+from ._deep_dive_native_solver import NativeSolver, get_native_solver
 from ._deep_dive_planner_rules import (
-    boss_outcomes, coord_dict, geometry, remaining_player_actions,
+    boss_move_mask, boss_outcomes, coord_dict, geometry, remaining_player_actions,
     validate_cube_size, validate_move_distance, validate_slot,
 )
 
@@ -78,6 +79,63 @@ class _Tables:
         return sum(array.nbytes for array in arrays) + (0 if self.pickup_slots is None else self.pickup_slots.nbytes)
 
 
+@dataclass(frozen=True)
+class _PackedTables:
+    context: tuple[int, int, tuple[int, ...]]
+    index: _StateIndex
+    own: np.ndarray
+    boss: np.ndarray
+    boss_weight: np.ndarray
+    free_count: np.ndarray
+    native: NativeSolver
+
+    @property
+    def nbytes(self):
+        index = self.index
+        return sum(array.nbytes for array in (index.player_orbit, index.player_frame, index.oriented_placements,
+                                               index.state_ids, self.own, self.boss, self.boss_weight,
+                                               self.free_count))
+
+
+class _OnDemandTail:
+    """The last two Bellman layers for the current decision, scoped to one solve."""
+
+    def __init__(self, dense, tables: _PackedTables, offsets, baseline, encounter_first, checkpoint):
+        self.dense = dense
+        self.tables = tables
+        self.offsets = offsets
+        self.baseline = baseline
+        self.encounter_first = encounter_first
+        self.checkpoint = checkpoint
+        self.values = np.empty_like(dense)
+        self.present = np.zeros(len(dense), dtype=bool)
+        self.layers = tuple(np.empty_like(dense) for _ in range(3))
+        self.marks = tuple(np.zeros(len(dense), dtype=np.uint8) for _ in range(3))
+
+    def _ensure(self, indices):
+        indices = np.asarray(indices, dtype=np.int32)
+        needed = np.unique(indices[~self.present[indices]])
+        if len(needed):
+            self.tables.native.requested_values(
+                self.dense, self.tables, self.offsets, needed, self.baseline, self.encounter_first,
+                self.layers, self.marks, self.values, self.checkpoint,
+            )
+            self.present[needed] = True
+
+    def value_at(self, index):
+        self._ensure([index])
+        return self.values[index, :2]
+
+    def boss_values(self, rows, count):
+        lanes = np.broadcast_to(count, rows.shape)
+        outgoing = self.tables.boss[rows]
+        indices = self.offsets[lanes, None] + (outgoing >> 1)
+        self._ensure(indices[outgoing >= 0])
+        return self.tables.native.boss_values(
+            self.values, self.tables, rows, self.offsets, count, self.baseline, self.checkpoint,
+        )
+
+
 def _deadline_check(deadline: float, cancel_check: Callable | None):
     if cancel_check is not None and cancel_check():
         raise PlanningCancelled("cancel_requested")
@@ -117,7 +175,7 @@ def _transition_byte_bound(geo, inspirations):
     return row_bytes * pair_count * placement_count + index_bytes
 
 
-def _state_index(geo, signature: tuple[int, ...], checkpoint: Callable):
+def _state_index(geo, signature: tuple[int, ...], checkpoint: Callable, native: NativeSolver | None = None):
     empty = len(geo.moves)
     first, second = _placements(geo, signature).T
     placement_ids = np.full((empty + 1, empty + 1), -1, dtype=np.int32)
@@ -132,6 +190,12 @@ def _state_index(geo, signature: tuple[int, ...], checkpoint: Callable):
     player_images = group[:, :empty]
     player_frame = player_images.argmin(axis=0)
     representatives, player_orbit = np.unique(player_images.min(axis=0), return_inverse=True)
+    if native is not None:
+        state_ids, *rows = native.canonical_ids(representatives, first, second, group, oriented, checkpoint)
+        for array in (player_orbit, player_frame, oriented, state_ids):
+            array.flags.writeable = False
+        return _StateIndex(player_orbit, player_frame, group, oriented, state_ids), *rows
+
     ranks = np.arange(empty * len(first), dtype=np.int32).reshape(empty, -1)
     canonical = np.empty((len(representatives), *ranks.shape), dtype=np.int32)
     boss_slots = np.arange(empty)[:, None]
@@ -226,15 +290,8 @@ def _build_tables(cube_size: int, move_distance: int, signature: tuple[int, ...]
                 pickup_slots[:, column] = np.where(legal, inverse_rotations[rotation, destination], empty)
         checkpoint()
 
-    face_area = cube_size**2
-    distance = (np.abs((p % face_area) // cube_size - (b % face_area) // cube_size)
-                + np.abs(p % cube_size - b % cube_size))
     destinations = geo.boss_moves[b]
-    after_distance = (np.abs((p[:, None] % face_area) // cube_size - (destinations % face_area) // cube_size)
-                      + np.abs(p[:, None] % cube_size - destinations % cube_size))
-    allowed = ((destinations >= 0)
-               & ((p[:, None] // face_area != b[:, None] // face_area)
-                  | (after_distance == distance[:, None] - 1)))
+    allowed = boss_move_mask(p, destinations)
     number_allowed = allowed.sum(axis=1)
     if np.any(number_allowed == 0):
         raise RuntimeError("Boss has no legal candidate in a nonterminal state")
@@ -274,8 +331,10 @@ def _table_context(cube_size: int, move_distance: int, inspirations: tuple[int, 
     return cube_size, move_distance, signature
 
 
-def _tables(cube_size: int, move_distance: int, inspirations: tuple[int, ...], checkpoint: Callable) -> _Tables:
-    key = _table_context(cube_size, move_distance, inspirations)
+def _tables(cube_size: int, move_distance: int, inspirations: tuple[int, ...], checkpoint: Callable,
+            native: NativeSolver | None = None) -> _Tables | _PackedTables:
+    context = _table_context(cube_size, move_distance, inspirations)
+    key = (context, native is not None)
     while not _BUILD_LOCK.acquire(timeout=.05):
         checkpoint()
     try:
@@ -283,7 +342,15 @@ def _tables(cube_size: int, move_distance: int, inspirations: tuple[int, ...], c
             _TABLE_CACHE.move_to_end(key)
             return _TABLE_CACHE[key]
         checkpoint()
-        built = _build_tables(*key, checkpoint)
+        if native is None:
+            built = _build_tables(*context, checkpoint)
+        else:
+            geo = geometry(cube_size=cube_size, move_distance=move_distance)
+            index, p, b, i, j, free = _state_index(geo, context[2], checkpoint, native)
+            own, boss, weights = native.transitions(cube_size, geo, index, p, b, i, j, checkpoint)
+            for array in (own, boss, weights, free):
+                array.flags.writeable = False
+            built = _PackedTables(context, index, own, boss, weights, free, native)
         checkpoint()
         if built.nbytes <= _TABLE_CACHE_LIMIT_BYTES:
             _TABLE_CACHE[key] = built
@@ -304,6 +371,16 @@ def _lex_better(candidate, current, selected, order):
         better |= tied & (difference > _TOLERANCE)
         tied &= np.abs(difference) <= _TOLERANCE
     return better
+
+
+def _better_score(candidate, current, order):
+    for column, sign in order:
+        difference = sign * (float(candidate[column]) - float(current[column]))
+        if difference > _TOLERANCE:
+            return True
+        if not abs(difference) <= _TOLERANCE:
+            return False
+    return False
 
 
 def _boss_values(previous, tables: _Tables, rows, offsets, count, baseline: int, checkpoint: Callable):
@@ -353,10 +430,11 @@ def _step(previous, tables: _Tables, limits: tuple[int, ...], offsets, baseline:
     return current
 
 
-def _continuation_values(tables: _Tables, limits: tuple[int, ...], offsets, horizon: int, baseline: int,
+def _continuation_values(tables: _Tables | _PackedTables, limits: tuple[int, ...], offsets, horizon: int, baseline: int,
                          encounter_first: bool, checkpoint: Callable):
     """Reuse full future rounds while evaluating this round on the live state."""
-    context = (encounter_first, baseline, tables.context)
+    packed = isinstance(tables, _PackedTables)
+    context = (encounter_first, baseline, (tables.context, packed))
     with _CONTINUATION_LOCK:
         reusable = max((key for key in _CONTINUATION_CACHE if key[:3] == context and key[3] <= horizon),
                        default=None)
@@ -369,7 +447,11 @@ def _continuation_values(tables: _Tables, limits: tuple[int, ...], offsets, hori
             reused_rounds = reusable[3]
     order = _ENCOUNTER_ORDER if encounter_first else _YIELD_ORDER
     for completed in range(reused_rounds + 1, horizon + 1):
-        values = _step(values, tables, limits, offsets, baseline, checkpoint, order)
+        if packed:
+            values = tables.native.step(values, tables, limits, offsets, baseline, encounter_first,
+                                        completed == 1, checkpoint)
+        else:
+            values = _step(values, tables, limits, offsets, baseline, checkpoint, order)
         checkpoint()
         values.flags.writeable = False
         key = (*context, completed)
@@ -385,14 +467,15 @@ def _continuation_values(tables: _Tables, limits: tuple[int, ...], offsets, hori
 
 
 def _cached_inspiration_continuation(context, horizon: int, collected: int,
-                                     encounter_first: bool, checkpoint: Callable):
+                                     encounter_first: bool, checkpoint: Callable, *, packed: bool = False):
     """Find a completed layer whose state space includes the current layout."""
     cube_size, move_distance, orbits = context
     candidates = []
     with _CONTINUATION_LOCK:
         for key in reversed(_CONTINUATION_CACHE):
-            objective, baseline, (size, distance, parents), depth = key
-            if objective != encounter_first or depth != horizon or (size, distance) != (cube_size, move_distance):
+            objective, baseline, ((size, distance, parents), cached_packed), depth = key
+            if (objective != encounter_first or cached_packed != packed or depth != horizon
+                    or (size, distance) != (cube_size, move_distance)):
                 continue
             # A removed item accounts for either one pickup or one consumption.
             if (0 <= collected - baseline <= len(parents) - len(orbits)
@@ -401,7 +484,7 @@ def _cached_inspiration_continuation(context, horizon: int, collected: int,
     if not candidates:
         return None
     # Prefer the smallest applicable profile, then the most recently used layer.
-    candidates.sort(key=lambda key: len(key[2][2]))
+    candidates.sort(key=lambda key: len(key[2][0][2]))
     while not _BUILD_LOCK.acquire(timeout=.05):
         checkpoint()
     try:
@@ -546,10 +629,13 @@ def _exact_choice(options, cube_size, move_distance, inspirations, collected_cou
     reused_subset = False
     if turn_budget > 1:
         horizon = turn_budget - 1
+        native = get_native_solver() if collected_count <= 2**31 - 3 else None
         context = _table_context(cube_size, move_distance, inspirations)
-        cached = _cached_inspiration_continuation(context, horizon, collected_count, encounter_first, checkpoint)
+        cached = _cached_inspiration_continuation(
+            context, horizon, collected_count, encounter_first, checkpoint, packed=native is not None,
+        )
         if cached is None:
-            tables = _tables(cube_size, move_distance, inspirations, checkpoint)
+            tables = _tables(cube_size, move_distance, inspirations, checkpoint, native)
             baseline = collected_count
         else:
             tables, continuation_values, baseline = cached
@@ -563,13 +649,29 @@ def _exact_choice(options, cube_size, move_distance, inspirations, collected_cou
         offsets = np.cumsum((0, *limits[:-1]), dtype=np.int32)
         state_count = limits[0]
         if cached is None:
-            continuation_values, reused_rounds = _continuation_values(
-                tables, limits, offsets, horizon, baseline, encounter_first, checkpoint)
+            # Final layers have relatively few callers on large tables. Keep
+            # their scratch local and publish only complete earlier layers.
+            on_demand = isinstance(tables, _PackedTables) and state_count >= 150_000 and horizon >= 4
+            dense, reused_rounds = _continuation_values(
+                tables, limits, offsets, horizon - 2 if on_demand else horizon,
+                baseline, encounter_first, checkpoint,
+            )
+            continuation_values = (_OnDemandTail(dense, tables, offsets, baseline, encounter_first, checkpoint)
+                                   if on_demand else dense)
         successors = np.array([_index(tables, options[k][0].final_player, options[k][0].final_boss, options[k][1])
                                for k in live_rows], dtype=np.int32)
         gains = np.array([options[k][2] for k in live_rows], dtype=np.int32)
-        option_values[live_rows] = _boss_values(
-            continuation_values, tables, successors, offsets, already_picked_up + gains, baseline, checkpoint)
+        counts = already_picked_up + gains
+        if isinstance(continuation_values, _OnDemandTail):
+            option_values[live_rows] = continuation_values.boss_values(successors, counts)
+        elif isinstance(tables, _PackedTables):
+            option_values[live_rows] = tables.native.boss_values(
+                continuation_values, tables, successors, offsets, counts, baseline, checkpoint,
+            )
+        else:
+            option_values[live_rows] = _boss_values(
+                continuation_values, tables, successors, offsets, counts, baseline, checkpoint,
+            )
     else:
         # No future player decisions. Resolve only the physical boss outcomes
         # of this turn; no canonical index or transition table is needed.
@@ -591,7 +693,7 @@ def _exact_choice(options, cube_size, move_distance, inspirations, collected_cou
         else:
             value = option_values[k]
             value[2] += gain
-        if selected_idx is None or _lex_better(value[None, :], selected_value[None, :], np.ones(1, bool), order)[0]:
+        if selected_idx is None or _better_score(value, selected_value, order):
             selected_idx, selected_value = k, value
     if selected_idx is None:
         raise RuntimeError("No legal player action selected")
@@ -602,7 +704,11 @@ def _exact_choice(options, cube_size, move_distance, inspirations, collected_cou
         if tables is not None:
             target = _index(tables, player, boss, free)
             lane = already_picked_up + options[selected_idx][2]
-            probability_after, score_after = continuation_values[offsets[lane] + target, :2]
+            index = offsets[lane] + target
+            if isinstance(continuation_values, _OnDemandTail):
+                probability_after, score_after = continuation_values.value_at(index)
+            else:
+                probability_after, score_after = continuation_values[index, :2]
         return dict(continuation_deadline_probability=float(probability_after),
                     continuation_expected_successful_total_inspirations=float(score_after))
 
@@ -615,5 +721,6 @@ def _exact_choice(options, cube_size, move_distance, inspirations, collected_cou
     solver = dict(method="finite_horizon_exhaustive_dynamic_programming", state_count=state_count,
                   reused_future_rounds=reused_rounds, reused_inspiration_subset=reused_subset,
                   model_optimality="numerical_exhaustive",
+                  backend="native" if isinstance(tables, _PackedTables) else "numpy",
                   comparison_tolerance=_TOLERANCE)
     return selected_idx, metrics, solver, continuation_metrics

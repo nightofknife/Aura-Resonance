@@ -73,6 +73,8 @@
       "plans/resonance_pc/assets/input_bridge/profiles/unity-2019.4.40f1c1.json",
       "plans/resonance_pc/assets/input_bridge/licenses/MinHook.txt",
       "plans/resonance_pc/assets/input_bridge/licenses/nlohmann-json.txt",
+      "plans/resonance_pc/assets/deep_dive_solver/aura_deep_dive_solver.dll",
+      "plans/resonance_pc/assets/deep_dive_solver/vcomp140.dll",
       "plans/resonance_pc/templates/commerce/investment/cape_island/controls/income_entry.png",
       "plans/resonance_pc/templates/commerce/investment/cape_island/masks/income_entry.png",
       "run.ps1",
