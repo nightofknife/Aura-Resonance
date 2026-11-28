@@ -675,17 +675,19 @@ def recover_pending_updates(root: Path) -> bool:
     transactions = _filesystem_path(_confined_child(root, ".update-work", "transactions"), recursive=True)
     for journal in sorted(transactions.glob("*/transaction.json")):
         state = _load_json(journal)
+        status = state.get("status")
         recorded_root = state.get("install_root")
+        # Completed transactions keep backups and can move with the installation.
         if (
             state.get("schema") != 1
             or not isinstance(recorded_root, str)
-            or _plain_path(Path(recorded_root)) != root
+            or (status != "completed" and _plain_path(Path(recorded_root)) != root)
         ):
             raise UpdateError(f"无法识别更新记录：{journal}")
         entries = state.get("entries", [])
         if [entry.get("name") for entry in entries] != list(MANAGED_PATHS):
             raise UpdateError(f"更新记录的文件范围无效：{journal}")
-        if state.get("status") in {"installing", "rolling_back", "rollback_failed"}:
+        if status in {"installing", "rolling_back", "rollback_failed"}:
             LOG.warning("phase=recover_interrupted transaction=%s", journal.parent.name)
             _rollback(root, journal, state)
             recovered = True
