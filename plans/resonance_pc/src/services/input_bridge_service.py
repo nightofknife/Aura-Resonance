@@ -393,38 +393,51 @@ class ResonancePcInputBridgeService:
         return self._read_deep_dive("controls")
 
     def read_deep_dive_choice(self, formation_policy: dict | None = None) -> dict:
+        return self._read_deep_dive_choice(formation_policy, include_screen=False)
+
+    def read_deep_dive_screen(self, formation_policy: dict | None = None, *, observe_event: bool = False) -> dict:
+        return self._read_deep_dive_choice(formation_policy, include_screen=True, observe_event=observe_event)
+
+    def _read_deep_dive_choice(self, formation_policy, *, include_screen, observe_event=False):
         if not self.enabled:
             raise TargetRuntimeError("input_bridge_required", "识海深潜选项需要桥接输入器。")
         with target_operation_guard(self.target_runtime), activity("data", "bridge.deep_dive_choice"), self._lock:
             self._ready()
             if not self._capabilities.get("deep_dive_choices"):
                 raise TargetRuntimeError("deep_dive_choice_unsupported", "当前桥接宿主未提供识海深潜选项。")
-            args = {"command": "read", **(formation_policy or {})}
-            if self._deep_dive_trace:
+            if include_screen and not self._capabilities.get("deep_dive_screen"):
+                raise TargetRuntimeError("deep_dive_screen_unsupported", "当前桥接宿主未提供识海深潜原生页面读取。")
+            args = {"command": "read", "include_screen": include_screen, **(formation_policy or {})}
+            sample_event = self._deep_dive_trace or observe_event
+            if sample_event:
                 args["event_trace"] = "sample"
             reply = self._client.request("deep_dive_choice", args,
                                          viewport=self._viewport, timeout=3.0)
             snapshot = reply.get("result", {}).get("choice")
-            if self._deep_dive_trace and isinstance(snapshot, dict):
+            if sample_event and isinstance(snapshot, dict):
                 event_trace = snapshot.pop("event_trace", None)
+                if observe_event and isinstance(event_trace, dict):
+                    snapshot["event_trace"] = event_trace
                 trace = dict(event_trace) if isinstance(event_trace, dict) else {"status": "missing"}
                 records = trace.pop("records", [])
                 trace["choice_kind"] = snapshot.get("kind")
                 trace["choice_status"] = snapshot.get("status")
                 trace["choice_wait_reason"] = snapshot.get("wait_reason")
-                if records or trace != self._deep_dive_trace_state:
+                if self._deep_dive_trace and (records or trace != self._deep_dive_trace_state):
                     log_event("deep_dive.event_trace", snapshot=trace, records=records)
-                    self._deep_dive_trace_state = trace
+                self._deep_dive_trace_state = trace
         if (not isinstance(snapshot, dict) or snapshot.get("schema") != "resonance_pc.deep_dive_choice.v1"
                 or snapshot.get("kind") not in {"none", "options", "cards", "replacement",
                                                 "battle_defeat", "battle_victory", "rest_shortage", "rest_finish",
                                                 "battle_retry_confirm",
                                                 "rest_main", "rest_recruit", "rest_revive", "rest_intensify",
                                                 "rest_awake", "rest_feedback",
-                                                "shop", "shop_feedback",
+                                                "shop", "shop_feedback", "opening", "cleanup",
+                                                "item_feedback", "boss_entry", "event_end",
                                                 "formation_fill", "formation_start", "formation_leave",
                                                 "formation_quit", "formation_finish"}
-                or snapshot.get("status") not in {"absent", "waiting", "ready", "submitted"}):
+                or snapshot.get("status") not in {"absent", "waiting", "ready", "submitted"}
+                or include_screen and not isinstance(snapshot.get("scene"), str)):
             raise TargetRuntimeError("deep_dive_choice_invalid", "桥接器返回了无效的识海深潜选项快照。")
         return snapshot
 

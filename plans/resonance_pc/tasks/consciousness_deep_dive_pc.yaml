@@ -13,9 +13,10 @@ consciousness_deep_dive_pc:
     require_bridge:
       action: resonance_pc.require_deep_dive_bridge
       params: {require_choices: true}
+
     require_resolution:
-      depends_on: require_bridge
       action: resonance_pc.require_client_resolution
+      depends_on: require_bridge
 
     enter_stage:
       action: resonance_pc.consciousness_deep_dive_enter_stage

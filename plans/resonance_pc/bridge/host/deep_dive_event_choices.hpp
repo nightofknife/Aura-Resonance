@@ -5,7 +5,7 @@
 namespace bridge {
 
 inline constexpr auto deep_dive_choice_prelude = R"lua(
-local tracking, command, revision, kind, subject, index, id, fill_flag, fixed_ids = ...
+local tracking, command, revision, kind, subject, index, id, fill_flag, fixed_ids, include_screen, recovery_map_id = ...
 local allow_formation_fill = fill_flag ~= 0
 local fixed_party = {}
 for member in string.gmatch(fixed_ids or '', '%d+') do fixed_party[tonumber(member)] = true end
@@ -199,18 +199,83 @@ local function read_rest_settlement(url)
     return panel
 end
 
-if network_busy() then
-    if command ~= 'read' then return {status='waiting'} end
-    return {status='waiting', kind=tracking.identity and tracking.kind or 'none',
-            wait_reason='network_busy'}
+local function read_recovery_exit(url)
+    if recovery_map_id == 0 or (url ~= main_url and url ~= quit_url) then return nil end
+    local model = package.loaded[runtime_main_prefix .. 'DataModel']
+    local board = model and model.rubikCube
+    local round = model and tonumber(model.stepNum)
+    if not board or not round or reward_choice_id(model.mapID) ~= recovery_map_id then return nil end
+
+    local on_board = url == main_url
+    local owner = UIManager:GetPanel(url)
+    local panel = {kind='cleanup', page=on_board and 'restart_quit' or 'restart_finish', ready=false, rows={}}
+    if not owner or owner.IsPlayAnimator then return panel end
+
+    if on_board then
+        local view = package.loaded[runtime_main_prefix .. 'View']
+        local top_left = view and view.Group_CommonTopLeft
+        local rotations = tonumber(model.curRotNum)
+        local maximum = type(model.GetMaxRotNum) == 'function' and tonumber(model.GetMaxRotNum())
+        local screen = read_main_screen(url)
+        if screen.scene ~= 'board' or not screen.player_turn or not model.roleCtrl or model.roleCtrl.IsMoving
+            or not rotations or not maximum or rotations < maximum
+            or not battle_button_available(top_left and top_left.Btn_Return) then return panel end
+        panel.identity = board
+        interval_row(panel, recovery_map_id, 'quit', function()
+            tracking.recovery_exit = {board=board, map_id=recovery_map_id, round=round}
+            UIManager:Open(quit_url)
+            return 'submitted'
+        end)
+    else
+        local exit = tracking.recovery_exit
+        if not exit or exit.board ~= board or exit.map_id ~= recovery_map_id or exit.round ~= round then
+            return panel
+        end
+        local prefix = 'UICubeRogueQuit/UICubeRogueQuit'
+        local view = package.loaded[prefix .. 'View']
+        local buttons = package.loaded[prefix .. 'ViewFunction']
+        local finish = buttons and buttons.CubeRogueQuit_Group_Btn_Btn_Finish_Click
+        if not visible(view) or not view.Group_Btn or not battle_button_available(view.Group_Btn.Btn_Finish)
+            or type(finish) ~= 'function' then return panel end
+        panel.identity = view.self
+        interval_row(panel, recovery_map_id, 'finish', function()
+            finish(nil, nil)
+            tracking.recovery_exit = nil
+            return 'submitted'
+        end)
+    end
+    panel.subject_id, panel.content, panel.ready = recovery_map_id, round, true
+    return panel
 end
 
 local url = UIManager and UIManager:GetCurrentPanelURL()
+local function describe(result, panel)
+    if panel then
+        result.page, result.outcome = panel.page, panel.outcome
+    end
+    if include_screen ~= 0 then
+        local screen = read_main_screen(url)
+        result.scene = screen and screen.scene or 'unknown'
+        result.player_turn = screen and screen.player_turn or false
+        result.event_type = screen and screen.event_type
+        result.panel_url = url
+    end
+    return result
+end
+
+if network_busy() then
+    if command ~= 'read' then return {status='waiting'} end
+    return {status='waiting', kind=tracking.identity and tracking.kind or 'none',
+            wait_reason='network_busy', scene=include_screen ~= 0 and 'unknown' or nil,
+            panel_url=include_screen ~= 0 and url or nil}
+end
+
 local panel = read_formation_exit(url) or read_formation(url) or read_reward_choice(url) or read_rest_interval(url)
-    or read_gaming_shop(url) or read_event_choice(url) or read_battle_result(url) or read_rest_settlement(url)
+    or read_gaming_shop(url) or read_runtime_controls(url) or read_event_choice(url) or read_battle_result(url)
+    or read_rest_settlement(url) or read_final(url) or read_opening(url) or read_recovery_exit(url)
 if not panel then
     tracking.identity = nil
-    if command == 'read' then return {status='absent', kind='none'} end
+    if command == 'read' then return describe({status='absent', kind='none'}) end
     return {status='changed'}
 end
 
@@ -229,17 +294,17 @@ end
 
 if command == 'read' then
     if not panel.ready then
-        return {status='waiting', kind=panel.kind, reason=panel.reason, wait_reason=panel.wait_reason,
+        return describe({status='waiting', kind=panel.kind, reason=panel.reason, wait_reason=panel.wait_reason,
                 roster_detail=panel.roster_detail, boss_encounter=panel.boss_encounter,
                 subject_id=panel.kind == 'formation_start' and panel.subject_id or nil,
                 selected_count=panel.selected_count, available_count=panel.available_count,
-                required_count=panel.required_count, party=panel.party}
+                required_count=panel.required_count, party=panel.party}, panel)
     end
     local status = tracking.submitted and 'submitted' or 'ready'
-    return {status=status, kind=panel.kind, revision=tracking.revision,
+    return describe({status=status, kind=panel.kind, revision=tracking.revision,
             subject_id=panel.subject_id, rows=panel.rows, selected_count=panel.selected_count,
             available_count=panel.available_count, required_count=panel.required_count,
-            party=panel.party, roster=panel.roster, balance=panel.balance, boss_encounter=panel.boss_encounter}
+            party=panel.party, roster=panel.roster, balance=panel.balance, boss_encounter=panel.boss_encounter}, panel)
 end
 if panel.kind ~= kind or tracking.revision ~= revision or panel.subject_id ~= subject then
     return {status='changed'}

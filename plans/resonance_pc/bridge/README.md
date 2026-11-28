@@ -116,6 +116,17 @@ panel state. Raw request and response bodies stay out of the log. Set
 `AURA_DEEP_DIVE_EVENT_TRACE=0` to disable it. The runner detaches the trace when
 the bridge closes.
 
+### Deep Dive native screens
+
+The `deep_dive_screen` capability extends `deep_dive_choice` reads with
+`include_screen: true`. It reports the active scene, selected node type and
+player-turn flag. On the player board it also returns the current map ID and
+turn counters, including the same inspiration count used by the client.
+
+Opening, ordinary item feedback, event endings and final settlement expose
+revision-checked choices. Final settlement includes its native outcome.
+Deep Dive tasks save screenshots as diagnostic evidence.
+
 ## Build
 
 Use PowerShell 7 from the repository root with CMake, Ninja and an x64 C++17

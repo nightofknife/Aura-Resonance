@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import cv2
 
-from packages.aura_core.api import action_info, requires_services
+from packages.aura_core.api import requires_services
 from packages.aura_core.observability.logging.core_logger import logger
 from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
@@ -461,8 +461,6 @@ def _advance_state(state: dict, observation: dict) -> tuple[str, list[int] | Non
     return "wait", None
 
 
-@action_info(name="resonance_pc.deep_dive_single_run_initialize", public=True, read_only=False,
-             description="Start a guarded Deep Dive board-only test session.")
 @requires_services(app="plans/aura_base/app", state_store="core/state_store")
 async def initialize_deep_dive_single_run(round_budget: int = 20, random_seed: int = 0,
                                           app: Any = None, state_store: Any = None) -> dict:
@@ -492,8 +490,6 @@ async def initialize_deep_dive_single_run(round_budget: int = 20, random_seed: i
             "last_frame": state["last_frame"]}
 
 
-@action_info(name="resonance_pc.deep_dive_single_run_advance", public=True, read_only=False,
-             description="Advance one guarded board, event, or rotation state.")
 @requires_services(app="plans/aura_base/app", ocr="plans/aura_base/ocr", state_store="core/state_store")
 async def advance_deep_dive_single_run(session_key: str, app: Any = None, ocr: Any = None,
                                        state_store: Any = None) -> dict:
@@ -569,8 +565,6 @@ async def advance_deep_dive_single_run(session_key: str, app: Any = None, ocr: A
             "scene": observed.get("scene"), "turns_completed": state["turns_completed"]}
 
 
-@action_info(name="resonance_pc.deep_dive_single_run_finish", public=True, read_only=False,
-             description="Return the verified settlement or blocked single-run result.")
 @requires_services(app="plans/aura_base/app", state_store="core/state_store")
 async def finish_deep_dive_single_run(session_key: str, app: Any = None,
                                       state_store: Any = None) -> dict:

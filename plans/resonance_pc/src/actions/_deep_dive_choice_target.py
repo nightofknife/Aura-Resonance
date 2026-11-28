@@ -74,12 +74,10 @@ def new_card_panel(rows, pending):
 
 
 def result_progress(pending, observation):
-    # A transition frame or a visual change does not acknowledge a discard if
-    # the same full-bag dialog is still present.
-    if observation['scene'] == ITEM_REPLACEMENT and pending.get('native', {}).get('kind') == 'replacement':
-        current = observation.get('native')
-        return current is not None and current['revision'] != pending['native']['revision']
+    native = pending.get('native')
     current = observation.get('native')
-    if pending.get('native', {}).get('kind') == 'shop_feedback' and current is not None:
-        return current['revision'] != pending['native']['revision']
+    if current is not None and native is not None:
+        return current['revision'] != native['revision']
+    if observation['scene'] == ITEM_REPLACEMENT and native is not None:
+        return False
     return result_changed(pending.get('result_scene'), pending.get('visual'), observation)

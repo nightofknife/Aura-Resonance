@@ -82,15 +82,13 @@ consciousness_deep_dive_loop_pc:
         require_turn: true
         require_actions: true
         require_choices: true
+        require_screen: true
         require_interval: true
         require_battle_retry: "{{ inputs.battle_retry_limit > 0 }}"
         require_shop: "{{ inputs.shop_policy.enabled | default(true) }}"
-    require_resolution:
-      depends_on: require_bridge
-      action: resonance_pc.require_client_resolution
     initialize:
       action: resonance_pc.deep_dive_loop_initialize
-      depends_on: require_resolution
+      depends_on: require_bridge
       params:
         loop_count: "{{ inputs.loop_count }}"
         count_failed_runs: "{{ inputs.count_failed_runs | default(false) }}"
@@ -129,7 +127,7 @@ deep_dive_cycle_pc:
   steps:
     require_bridge:
       action: resonance_pc.require_deep_dive_bridge
-      params: {require_turn: true, require_actions: true, require_choices: true}
+      params: {require_turn: true, require_actions: true, require_choices: true, require_screen: true}
     begin:
       action: resonance_pc.deep_dive_loop_begin
       depends_on: require_bridge
