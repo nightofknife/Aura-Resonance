@@ -67,21 +67,21 @@ def test_native_battle_waits_three_minutes_for_unclassified_combat():
     assert advance_context(context, combat, 181)['reason'] == 'battle_start_transition_timeout'
 
 
-def test_roster_failure_detail_is_logged_without_changing_wait_status(monkeypatch):
+def test_roster_failure_detail_is_logged_without_changing_wait_status(monkeypatch, tmp_path):
     state = run_state()
-    state.update(phase_started=time.monotonic(), terminal_reached=False)
+    state.update(phase_started=time.monotonic(), terminal_reached=False,
+                 output_dir=str(tmp_path), report_path=str(tmp_path / 'report.md'))
     snapshot = dict(
         kind='formation_start', status='waiting', subject_id=20102299,
         wait_reason='formation_roster_unavailable', roster_detail='empty_role_key',
         selected_count=4, required_count=5,
+        scene='unknown', player_turn=False, panel_url='UI/CubeRogue/Team_Cube/Team_Battle',
     )
-    bridge = SimpleNamespace(read_deep_dive_choice=Mock(return_value=snapshot))
-    app = SimpleNamespace(get_window_size=lambda: (1280, 720), controller=SimpleNamespace(bridge=bridge))
-    advance = AsyncMock()
+    bridge = SimpleNamespace(read_deep_dive_screen=Mock(return_value=snapshot))
+    app = SimpleNamespace(controller=SimpleNamespace(bridge=bridge))
+    advance = AsyncMock(wraps=runtime._advance_state)
     log = Mock()
     monkeypatch.setattr(runtime, '_load', AsyncMock(return_value=state))
-    monkeypatch.setattr(runtime, '_capture', AsyncMock(return_value=(object(), {'scene': 'battle_formation'})))
-    monkeypatch.setattr(runtime, '_read_runtime_hud', AsyncMock(return_value={}))
     monkeypatch.setattr(runtime, '_advance_state', advance)
     monkeypatch.setattr(runtime, '_save', AsyncMock())
     monkeypatch.setattr(runtime, '_log', log)
@@ -93,7 +93,9 @@ def test_roster_failure_detail_is_logged_without_changing_wait_status(monkeypatc
             assert result['status'] == 'running'
 
     asyncio.run(run())
+    assert bridge.read_deep_dive_screen.call_count == 2
     observation = advance.await_args.args[5]
+    assert observation['native_choice_status'] == 'waiting'
     assert observation['native_choice_reason'] is None
     assert observation['native_wait_reason'] == 'formation_roster_unavailable'
     log.assert_called_once_with(

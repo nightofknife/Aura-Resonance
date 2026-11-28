@@ -100,7 +100,7 @@ def test_deep_dive_choice_collects_diagnostics_without_changing_choice(monkeypat
 
     def request(op, args=None, **_):
         calls.append((op, args))
-        if args == {"command": "read", "event_trace": "sample"}:
+        if args == {"command": "read", "include_screen": False, "event_trace": "sample"}:
             return {"result": {"choice": dict(choice, event_trace=deepcopy(next(frames)))}}
         return {"result": {}}
 

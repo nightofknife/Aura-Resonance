@@ -31,7 +31,10 @@ RETIRED = {
     "consciousness_deep_dive_drag_distance_probe_round_pc",
     "consciousness_deep_dive_sensitivity_probe_pc",
 }
-RENAMED = {"consciousness_deep_dive_single_run_test_pc": "consciousness_deep_dive_random_run_pc"}
+ARCHIVED = {
+    "consciousness_deep_dive_entry_card_probe_pc": "consciousness_deep_dive_entry_card_probe_pc",
+    "consciousness_deep_dive_single_run_test_pc": "consciousness_deep_dive_random_run_pc",
+}
 ADDED = {"affix_refresh_pc", "affix_refresh_read_pc", "withdraw_product_warehouse_to_train_pc",
          "auto_battle_enter_terminal_pc", "auto_battle_enter_category_pc",
          "collect_and_withdraw_products_pc", "read_visible_prison_products_pc",
@@ -60,14 +63,21 @@ def test_all_source_definitions_accounted_without_retired_aliases():
     inventory = json.loads((ROOT / "tests/fixtures/task_hierarchy_source_inventory.json").read_text(encoding="utf-8"))
     original = {row["key"] for row in inventory}
     current = definitions()
+    archived = {
+        path.stem: set(yaml.safe_load(path.read_text(encoding="utf-8")))
+        for path in (PLAN / "legacy/deep_dive").glob("*.yaml")
+    }
     assert len(inventory) == len(original) == 62
-    assert set(current) == (original - REMOVED.keys() - RETIRED - RENAMED.keys()) | set(RENAMED.values()) | ADDED
-    assert len(current) == 66
-    assert all(replacement in current for replacement in (*REMOVED.values(), *RENAMED.values()))
+    assert ARCHIVED.keys() <= original
+    assert archived == {task: {task} for task in ARCHIVED.values()}
+    assert archived.keys().isdisjoint(current)
+    assert set(current) == (original - REMOVED.keys() - RETIRED - ARCHIVED.keys()) | ADDED
+    assert len(current) == 64
+    assert all(replacement in current for replacement in REMOVED.values())
     assert all(spec["meta"]["domain"] for spec in current.values())
     assert Counter(task_role(spec["meta"]) for spec in current.values()) == {
         "lifecycle": 2, "orchestration": 1, "user_task": 17, "user_tool": 3,
-        "developer": 4, "internal": 39,
+        "developer": 3, "internal": 38,
     }
 
 
