@@ -34,7 +34,7 @@ from ._deep_dive_planned_run_vision import (
     BOARD_SCENES, NODE_EVENT_TYPES, TURN_FIELDS, enrich_observation, observe, read_hud,
 )
 from .consciousness_deep_dive_scan_pc_actions import reset_layout_view
-from ._deep_dive_native_layout import layout_from_board, native_cell_for_slot
+from ._deep_dive_native_layout import NODE_INFO, layout_from_board, native_cell_for_slot
 from ._deep_dive_native_choices import is_formation_page, observe_choice
 from ._deep_dive_scan_budget import normalize_scan_route, resolve_scan_budget, post_scan_recognition_budget
 from ._deep_dive_movement_planner import ENCOUNTER_THEN_INSPIRATION, STRATEGIES, plan_current_state
@@ -47,7 +47,7 @@ from . import _deep_dive_directed_operation_flow as directed
 from ._deep_dive_operation_frame import (
     build_operation_frame, build_wide_reference_frame, bind_move, bind_rotation, verify_rotation_preview,
 )
-from ._deep_dive_runtime_events import create_context, advance_context, REWARD
+from ._deep_dive_runtime_events import BATTLES, REWARD, advance_context, create_context
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT, fresh_discard_point
 
 SCHEMA = 'resonance_pc.deep_dive_planned_run.v1'
@@ -672,6 +672,34 @@ async def _execute_native_choice(app, target):
     return result
 
 
+def _read_entered_node_event(state, context, trace):
+    check = context.get('entry_event_check')
+    action = state.get('pending_action') or {}
+    destination = (action.get('binding') or {}).get('native_cell')
+    map_id = ((state.get('layout') or {}).get('native_board') or {}).get('map_id')
+    if (check is None or not destination or action.get('phase') != 'node_entered'
+            or action.get('action_id') != context['source_action_id'] or type(map_id) is not int or map_id <= 0
+            or trace.get('map_id') != map_id or trace.get('status') != 'active'):
+        return None
+
+    coord = '{row}:{col}:{face}'.format(**destination)
+    for record in trace.get('records', ()):
+        if record.get('coord') != coord or record.get('stage') != 'callback_returned':
+            continue
+        if record.get('protocol') == 'cube.move':
+            check['move_completed'] = True
+        elif record.get('protocol') == 'cube.event':
+            event_type, _ = NODE_INFO.get(record.get('node_type'), (None, None))
+            event_id, level = record.get('event_id'), record.get('level_id')
+            if event_type and type(event_id) is int and event_id > 0:
+                if event_type in BATTLES and not (type(level) is int and level > 0):
+                    continue
+                check.setdefault('event', dict(event_type=event_type, event_id=event_id, level_id=level))
+    if check.get('move_completed'):
+        return check.get('event')
+    return None
+
+
 async def _read_bridge_observation(state, app):
     policy = state.get('interval_policy') or {}
     formation_policy = {}
@@ -683,9 +711,10 @@ async def _read_bridge_observation(state, app):
     if restart:
         formation_policy['recovery_map_id'] = restart['map_id']
     stack = state.get('event_stack') or []
+    context = stack[-1] if stack else {}
     move = state.get('pending_action') or {}
-    observe_event = ((move.get('phase') == 'move_selection_wait' and move.get('target_node_kind') == 'healing')
-                     or (stack and 'node_event_probe' in stack[-1]))
+    observe_event = (move.get('phase') == 'move_selection_wait' or 'node_event_probe' in context
+                     or 'entry_event_check' in context)
     bridge = app.controller.bridge
     args = (formation_policy,) if formation_policy else ()
     read_options = {'observe_event': True} if observe_event else {}
@@ -696,8 +725,12 @@ async def _read_bridge_observation(state, app):
         enemy_turn=scene == 'enemy_turn', event_board=scene in BOARD_SCENES,
         event_type=snapshot.get('event_type'), panel_url=snapshot.get('panel_url'), map_id=snapshot.get('map_id'),
     )
+    resolved = None
     if observe_event:
         observation['move_event_trace'] = snapshot.get('event_trace')
+        resolved = _read_entered_node_event(state, context, snapshot.get('event_trace') or {})
+        if resolved:
+            observation['resolved_node_event'] = resolved
     if snapshot['kind'] == 'cleanup' and snapshot.get('page') in {'settlement_summary', 'settlement_details'}:
         observation.update(scene='settlement', outcome=snapshot.get('outcome') or 'unknown')
     elif (restart and snapshot['kind'] == 'cleanup' and snapshot['status'] == 'ready'
@@ -712,7 +745,8 @@ async def _read_bridge_observation(state, app):
                 index=rows[0]['index'], id=rows[0]['id'], recovery_map_id=restart['map_id'],
             )
     elif snapshot['kind'] != 'cleanup':
-        event_type = 'vortex' if _family(state) == 'vortex' else stack[-1]['event_type'] if stack else None
+        event_type = (resolved['event_type'] if resolved else
+                      'vortex' if _family(state) == 'vortex' else context.get('event_type'))
         observation = observe_choice(observation, snapshot, event_type)
         native = observation.get('native')
         if native and native['kind'] in {'formation_start', 'formation_fill', *FORMATION_SETTLEMENT_STEPS}:
@@ -1128,6 +1162,8 @@ async def _begin_node(state, app, image, observation, action):
     context['last_player_action'] = _last_action(action['before_hud'], 'move')
     if native_layout:
         context['native_entry_submitted'] = True
+        if owner == 'player_move_node' and observation.get('source') == 'bridge':
+            context['entry_event_check'] = {}
         if kind == 'healing' and occupant == 'none' and observation.get('source') == 'bridge':
             context['node_event_probe'] = {}
     state['event_stack'].append(context)
@@ -1442,9 +1478,32 @@ def _recover_missing_node_event(state, context, observation, hud, now):
     return True
 
 
+def _apply_entered_node_event(state, context, resolved, now):
+    expected = context['event_type']
+    actual = resolved['event_type']
+    if actual != expected:
+        boss = actual == 'boss_battle'
+        updated = create_context(actual, 'player_move_encounter' if boss else context['owner'], now,
+                                 source_action_id=context['source_action_id'],
+                                 resume='plane_transition' if boss else context['resume'],
+                                 observation={'native_entry_submitted': True})
+        updated.update(context_id=context['context_id'], started=context['started'],
+                       last_player_action=context['last_player_action'], native_entry_submitted=True,
+                       trace=context['trace'])
+        state['event_stack'][-1] = context = updated
+    context.pop('entry_event_check', None)
+    if actual in BATTLES:
+        context['battle_level'] = resolved['level_id']
+    _log(state, 'node_event_reclassified' if actual != expected else 'node_event_confirmed',
+         expected_event_type=expected, source_action_id=context['source_action_id'], **resolved)
+    return context
+
+
 async def _events(state, app, image, observation, hud=None):
     context = state['event_stack'][-1]
     now = time.monotonic()
+    if 'entry_event_check' in context and observation.get('resolved_node_event'):
+        context = _apply_entered_node_event(state, context, observation['resolved_node_event'], now)
     if _recover_missing_node_event(state, context, observation, hud or {}, now):
         return
     flow = context['flow']
@@ -1467,13 +1526,6 @@ async def _events(state, app, image, observation, hud=None):
         _log(state, 'vortex_battle_started', level_id=pending['battle_level'],
              choice_id=pending['native']['id'])
         return
-    if (context.get('battle_level') and context['phase'] == 'entry_wait' and formation_seen
-            and formation_level is not None and formation_level != context['battle_level']):
-        if _stable_scene(state, observation):
-            reason = ('boss_formation_level_mismatch' if context['event_type'] == 'boss_battle'
-                      else 'vortex_battle_level_mismatch')
-            _stop(state, reason, image)
-        return
     if (context['phase'] == 'entry_wait' and context['owner'] == 'player_move_node'
             and context['event_type'] in {'battle', 'elite_battle'} and context.get('last_player_action')
             and formation_seen and formation_level is not None and observation.get('formation_boss_encounter') is True
@@ -1481,6 +1533,14 @@ async def _events(state, app, image, observation, hud=None):
         if _stable_scene(state, observation):
             state['event_stack'].pop()
             _handoff_to_enemy_boss_formation(state, battle_level=formation_level, node_completed=True)
+        return
+    if (context.get('battle_level') and context['phase'] == 'entry_wait' and formation_seen
+            and formation_level is not None and formation_level != context['battle_level']):
+        if _stable_scene(state, observation):
+            reason = ('boss_formation_level_mismatch' if context['event_type'] == 'boss_battle'
+                      else 'vortex_battle_level_mismatch' if context['owner'] == 'vortex_sub_battle'
+                      else 'node_battle_level_mismatch')
+            _stop(state, reason, image)
         return
     if (context['event_type'] in {'battle', 'elite_battle', 'boss_battle'}
             and context['phase'] == 'entry_wait'

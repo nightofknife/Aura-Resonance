@@ -109,6 +109,7 @@ local result = {status='active', records=trace.records,
                 response_tracking=trace.callback_wrapper ~= nil and net.Callback == trace.callback_wrapper}
 trace.records = {}
 if model then
+    result.map_id = tonumber(model.mapID)
     result.player = cell_snapshot(model.playerCube)
     result.selected = cell_snapshot(model.curSelectCube)
     result.need_start_round = not not model.needStartRound
@@ -142,6 +143,21 @@ pcall(function()
         result.network_busy = not not (mask and mask.IsActive)
     end
 end)
+-- Resolve completed event callbacks outside the network callback itself.
+if PlayerData and type(PlayerData.GetFactoryData) == 'function' then
+    for _, entry in ipairs(result.records) do
+        if entry.protocol == 'cube.event' and entry.stage == 'callback_returned' and entry.event_id then
+            local ok, type_id, level = pcall(function()
+                local event = PlayerData:GetFactoryData(entry.event_id, 'CubeEventFactory')
+                if event then return tonumber(event.typeId), tonumber(event.levelId) end
+            end)
+            if ok then
+                entry.type_id = type_id
+                if level and level > 0 and level < 2147483648 then entry.level_id = level end
+            end
+        end
+    end
+end
 return result
 )lua";
 

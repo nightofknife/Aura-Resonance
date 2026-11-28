@@ -183,6 +183,74 @@ def test_last_move_elite_node_hands_native_boss_formation_to_plane_transition(mo
     assert [call.args[1]['kind'] for call in submit.await_args_list] == ['formation_start', 'battle_victory']
 
 
+@pytest.mark.parametrize('mismatch,event_first', [(None, False), (None, True), ('map', False),
+                                                  ('cell', False), ('level', False)])
+def test_yellow_node_rechecks_the_returned_battle_event(monkeypatch, mismatch, event_first):
+    cell = dict(face=2, row=2, col=4)
+    move = dict(kind='move', action_id='move', phase='move_selection_wait', expected_actor_slot=55,
+                destination_slot=56, binding={'native_cell': cell}, target_node_kind='item',
+                target_occupant='none', before_hud=dict(moves_total=1, moves_used=0,
+                                                        rotations_total=1, rotations_used=1))
+    state = dict(status='running', phase='operation', pending_action=move, event_stack=[],
+                 layout=dict(coordinate_frame='native_board', size=5, native_board={'map_id': 89400017}))
+    card = dict(scene='event_entry', event_type='item', kind='none', status='absent', player_turn=True)
+
+    def trace(*records):
+        return dict(status='active', map_id=89400018 if mismatch == 'map' else 89400017, records=records)
+
+    def callback(protocol, coord='2:4:2', **fields):
+        return dict(stage='callback_returned', protocol=protocol, coord=coord, **fields)
+
+    move_reply = callback('cube.move')
+    event_reply = callback('cube.event', '2:5:2' if mismatch == 'cell' else '2:4:2',
+                           event_id=89800240, node_type='elite_battle', level_id=20102302)
+    first, second = (event_reply, move_reply) if event_first else (move_reply, event_reply)
+    moved = dict(scene='unknown', kind='none', status='absent', player_turn=False, event_trace=trace(first))
+    level = 20102303 if mismatch == 'level' else 20102302
+    waiting = dict(scene='unknown', kind='formation_start', status='waiting', subject_id=level,
+                   wait_reason='formation_animating', player_turn=False,
+                   event_trace=trace(second))
+    ready = dict(waiting, status='ready', revision=92, event_trace=trace(),
+                 rows=[dict(id=level, index=1, disabled=False, selected=False)])
+    read_screen = Mock(side_effect=[card, moved, waiting, ready, ready, ready])
+    app = SimpleNamespace(controller=SimpleNamespace(bridge=SimpleNamespace(read_deep_dive_screen=read_screen)))
+    enter = AsyncMock(return_value='submitted')
+    battle = AsyncMock(return_value='submitted')
+    log = Mock()
+    monkeypatch.setattr(runtime, '_execute_native_action', enter)
+    monkeypatch.setattr(runtime, '_execute_native_choice', battle)
+    monkeypatch.setattr(runtime, '_log', log)
+
+    async def play():
+        await runtime._begin_node(state, app, None, dict(card, source='bridge'), move)
+        for _ in range(5):
+            observation, hud = await runtime._read_bridge_observation(state, app)
+            await runtime._advance_state(state, app, None, None, None, observation, hud)
+            if state['status'] != 'running':
+                break
+
+    asyncio.run(play())
+    enter.assert_awaited_once()
+    assert enter.await_args.args[1] == 'confirm_move'
+    assert read_screen.call_args_list[0].kwargs == {'observe_event': True}
+    context, = state['event_stack']
+    if mismatch in {'map', 'cell'}:
+        assert context['event_type'] == 'item'
+        battle.assert_not_awaited()
+    elif mismatch == 'level':
+        assert state['reason'] == 'node_battle_level_mismatch'
+        battle.assert_not_awaited()
+    else:
+        assert context['event_type'] == 'elite_battle' and context['phase'] == 'battle_wait'
+        assert context['owner'] == 'player_move_node' and context['source_action_id'] == 'move'
+        assert context['last_player_action'] and context['battle_level'] == level
+        assert state['pending_action'] is move
+        battle.assert_awaited_once_with(app, dict(kind='formation_start', revision=92, subject_id=level,
+                                                  index=1, id=level, command='confirm'))
+        log.assert_any_call(state, 'node_event_reclassified', expected_event_type='item', event_id=89800240,
+                            source_action_id='move', event_type='elite_battle', level_id=level)
+
+
 def test_shortage_leaves_formation_and_submits_settlement_once(monkeypatch):
     execute = AsyncMock(return_value='submitted')
     monkeypatch.setattr(runtime, '_execute_native_choice', execute)
