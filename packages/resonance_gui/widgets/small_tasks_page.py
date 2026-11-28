@@ -177,7 +177,7 @@ class SmallTasksPage(QWidget):
         self._task_pages[TEAM_RECOMMENDATION_TASK_ID] = self.team_recommendation_panel
 
         self.consciousness_deep_dive_panel = ConsciousnessDeepDivePanel(
-            self.detail_stack
+            self.detail_stack, settings=settings,
         )
         self.consciousness_deep_dive_panel.runLoopRequested.connect(self.runConsciousnessDeepDiveLoopRequested.emit)
         self.consciousness_deep_dive_panel.runPlannedRunRequested.connect(

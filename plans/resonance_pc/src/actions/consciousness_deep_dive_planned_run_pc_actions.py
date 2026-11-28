@@ -23,6 +23,11 @@ from packages.aura_core.observability.logging.core_logger import current_cid, lo
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.scheduler.utils import resolve_base_path
 from packages.aura_core.utils.exceptions import StopTaskException
+from packages.resonance_shared.deep_dive_interval import (
+    INTERVAL_PANELS, interval_candidate, normalize_interval_policy, purchase_observed,
+)
+from packages.resonance_shared.deep_dive_shop import normalize_shop_policy
+from packages.resonance_shared.deep_dive_event_options import normalize_event_option_policy
 from ....aura_base.src.platform.contracts import TargetRuntimeError
 
 from ._deep_dive_planned_run_vision import (
@@ -33,6 +38,7 @@ from ._deep_dive_native_layout import layout_from_board, native_cell_for_slot
 from ._deep_dive_native_choices import is_formation_page, observe_choice
 from ._deep_dive_scan_budget import normalize_scan_route, resolve_scan_budget, post_scan_recognition_budget
 from ._deep_dive_movement_planner import ENCOUNTER_THEN_INSPIRATION, STRATEGIES, plan_current_state
+from ._deep_dive_realtime_planner import REALTIME_BUDGET_SEC
 from ._deep_dive_target_readiness import targets_readiness, check_required_cells
 from ._deep_dive_required_cell_reader import read_required_cells, promote_read_reference
 from ._deep_dive_anchor_reader import propose_read_only_wide_reference, read_missing_registration_anchors
@@ -286,7 +292,18 @@ def _stop(state, reason, image=None, *, status='blocked'):
         state['pending_action']['interrupted'] = True
         state['pending_action']['outcome'] = 'unknown'
     _frame(state, image, status)
-    _log(state, status, reason=reason)
+    events = state.get('event_stack') or []
+    details = {}
+    if events:
+        event = events[-1]
+        flow = event.get('flow', {})
+        pending = event.get('pending') or flow.get('event_pending') or flow.get('vortex_pending') or {}
+        details.update(event_type=event.get('event_type'), event_phase=event.get('phase'),
+                       event_pending=pending.get('kind', pending.get('action')),
+                       last_scene=state.get('last_scene'), source_action_id=event.get('source_action_id'))
+        if flow.get('option_decision') is not None:
+            details['option_decision'] = flow['option_decision']
+    _log(state, status, reason=reason, **details)
 
 
 def _stable_scene(state, observation):
@@ -317,7 +334,7 @@ def _terminal(state, image, observation):
         if 'formation_finish' in formation_shortage.get('submitted', []):
             reason = 'formation_shortage_settled'
         elif 'rest_finish' in rest_shortage.get('submitted', []):
-            reason = 'insufficient_battle_roles_settled'
+            reason = rest_shortage.get('reason', 'insufficient_battle_roles_settled')
         state.update(status='completed', phase='stopped', input_owner=None,
                      reason=reason, terminal_reached=True, terminal='settlement',
                      outcome=signature)
@@ -338,11 +355,11 @@ def _hud_consensus(state, raw):
         state['hud_stable'] = 0
         state['last_hud_unknown'] = [key for key, value in values.items() if type(value) is not int]
         return None
-    if not (1 <= values['plane_index'] <= 3 and 0 <= values['rounds_remaining'] <= 30):
+    if not (1 <= values['plane_index'] <= 3 and values['rounds_remaining'] >= 0):
         state['hud_rule_error'] = 'unsupported_plane_or_round_count'
         return None
     for used, total in (('moves_used', 'moves_total'), ('rotations_used', 'rotations_total')):
-        if values[total] != 1 or not 0 <= values[used] <= 1:
+        if values[total] < 0 or values[used] < 0:
             state['hud_rule_error'] = 'unsupported_action_quota'
             return None
     if min(values['collected_count'], values['inspiration_total']) < 0:
@@ -362,6 +379,16 @@ def _hud_consensus(state, raw):
     state.pop('last_hud_unknown', None)
     state['rounds_remaining'] = values['rounds_remaining']
     return values
+
+
+def _quotas_exhausted(hud):
+    return hud['moves_used'] >= hud['moves_total'] and hud['rotations_used'] >= hud['rotations_total']
+
+
+def _last_action(hud, kind):
+    move = int(kind == 'move')
+    return (hud['moves_used'] + move >= hud['moves_total']
+            and hud['rotations_used'] + (1 - move) >= hud['rotations_total'])
 
 
 def _adopt_plane(state, hud):
@@ -478,14 +505,21 @@ async def _load(session_key, state_store):
 @requires_services(app='plans/aura_base/app', state_store='core/state_store', event_bus='core/event_bus')
 async def initialize_deep_dive_planned_run(strategy: str = 'encounter_then_inspiration', safety_round_limit: int = 100,
                                           scan_time_budget_sec: float = 300,
-                                          planning_time_budget_sec: float = 30,
+                                          planning_time_budget_sec: float = 0.35,
                                           app: Any = None, state_store: Any = None, event_bus: Any = None,
-                                          scan_route: str = 'cells'):
+                                          scan_route: str = 'cells', interval_policy: dict | None = None,
+                                          battle_retry_limit: int = 0, shop_policy: dict | None = None,
+                                          event_option_policy: list | None = None):
     if strategy not in STRATEGIES:
         raise ValueError('Unknown planning strategy')
     if isinstance(safety_round_limit, bool) or not isinstance(safety_round_limit, Integral) or not 1 <= safety_round_limit <= 100:
         raise ValueError('safety_round_limit must be an integer from 1 to 100')
     scan_route = normalize_scan_route(scan_route)
+    interval_policy = normalize_interval_policy(interval_policy)
+    shop_policy = normalize_shop_policy(shop_policy)
+    preferences = {entry['name']: entry for entry in normalize_event_option_policy(event_option_policy)}
+    if type(battle_retry_limit) is not int or battle_retry_limit < 0:
+        raise ValueError('战败重打次数必须是非负整数')
     scan_budget = resolve_scan_budget(scan_route, scan_time_budget_sec)
     for value, minimum, maximum in ((planning_time_budget_sec, .1, 300),):
         if isinstance(value, bool) or not math.isfinite(float(value)) or not minimum <= float(value) <= maximum:
@@ -497,8 +531,9 @@ async def initialize_deep_dive_planned_run(strategy: str = 'encounter_then_inspi
     directory.mkdir(parents=True, exist_ok=False)
     state = dict(schema=SCHEMA, session_key=key, cid=str(current_cid() or ''), sequence=0,
                  strategy=ENCOUNTER_THEN_INSPIRATION, safety_round_limit=int(safety_round_limit),
-                 scan_route=scan_route, scan_time_budget_sec=scan_budget,
-                 planning_time_budget_sec=float(planning_time_budget_sec),
+                 scan_route=scan_route, scan_time_budget_sec=scan_budget, interval_policy=interval_policy,
+                 battle_retry_limit=battle_retry_limit, shop_policy=shop_policy, event_option_policy=preferences,
+                 planning_time_budget_sec=min(float(planning_time_budget_sec), REALTIME_BUDGET_SEC),
                  post_scan_recognition_elapsed_sec=0.,
                  status='running', phase='scan_turn', phase_started=time.monotonic(), reason='',
                  plane_index=None, plane_epoch=uuid4().hex, planes_completed=0, completed_plane_indices=[],
@@ -762,7 +797,7 @@ async def _scan_turn(state, app, state_store, event_bus, hud):
     if state['turns_completed'] >= state['safety_round_limit']:
         _stop(state, 'safety_round_limit_reached')
         return
-    if hud['moves_used'] == hud['rotations_used'] == 1:
+    if _quotas_exhausted(hud):
         _enemy_wait(state, actions_exhausted=True)
         return
     if hud['rounds_remaining'] == 0:
@@ -783,8 +818,9 @@ async def _scan_turn(state, app, state_store, event_bus, hud):
     if board['size'] not in SUPPORTED_CUBE_SIZES:
         _stop(state, '关卡内移动和层转规划仅支持三阶、四阶和五阶魔方')
         return
-    if board['turn'].get('move_distance') not in (1, 2):
-        _stop(state, '当前移动距离不可确认，或超出支持的同面一至两格范围')
+    distance = board['turn'].get('move_distance')
+    if type(distance) is not int or distance < 1:
+        _stop(state, '当前移动距离不可确认')
         return
     layout = layout_from_board(board)
     if not layout['layout_complete'] or layout['singularity_cell'] is None:
@@ -823,8 +859,8 @@ async def _plan(state, state_store, event_bus):
         state['inspiration_consistency'] = consistency
         _stop(state, consistency['reason'])
         return
-    quota = dict(rounds_remaining=hud['rounds_remaining'], moves_left=hud['moves_total']-hud['moves_used'],
-                 rotations_left=hud['rotations_total']-hud['rotations_used'],
+    quota = dict(rounds_remaining=hud['rounds_remaining'], moves_left=max(0, hud['moves_total']-hud['moves_used']),
+                 rotations_left=max(0, hud['rotations_total']-hud['rotations_used']),
                  collected_count=state['collected_count'], move_distance=layout.get('move_distance', 1))
     layout['planning_state'] = quota
     state['input_owner'] = None
@@ -838,7 +874,8 @@ async def _plan(state, state_store, event_bus):
                                              rounds_remaining=quota['rounds_remaining'],
                                              moves_left=quota['moves_left'], rotations_left=quota['rotations_left'],
                                              collected_count=quota['collected_count'],
-                                             time_budget_sec=state['planning_time_budget_sec'], cancel_check=cancel),
+                                             time_budget_sec=state['planning_time_budget_sec'], cancel_check=cancel,
+                                             realtime=True),
                           cancellation)
     _cancel_check()
     result = _jsonable(result)
@@ -919,7 +956,7 @@ async def _begin_node(state, app, image, observation, action):
     owner = 'player_move_encounter' if boss_target else 'player_move_node'
     context = create_context(kind, owner, time.monotonic(), source_action_id=action['action_id'],
                              resume='plane_transition' if boss_target else 'verify_move', observation=observation)
-    context['last_player_action'] = action['before_hud']['rotations_used'] == 1
+    context['last_player_action'] = _last_action(action['before_hud'], 'move')
     # The recognized card establishes which event flow owns the next scene.
     if state['layout'].get('coordinate_frame') == 'native_board':
         fresh, observed = await _capture(app, _family(state))
@@ -949,7 +986,10 @@ async def _begin_node(state, app, image, observation, action):
     state['event_stack'].append(context)
     state['pending_action']['phase'] = 'node_entered'
     _phase(state, 'event_dispatch')
-    _log(state, 'node_entered', event_type=kind, owner=owner, action_id=action['action_id'])
+    _log(state, 'node_entered', event_type=kind, owner=owner, action_id=action['action_id'],
+         destination_slot=action.get('destination_slot'), target_occupant=occupant,
+         native_cell=(action.get('binding') or {}).get('native_cell'),
+         native_entry_submitted=context.get('native_entry_submitted', False))
 
 
 async def _operate_native(state, app, image, observation, action):
@@ -1042,7 +1082,7 @@ def _action_outcome(state, image, observation, hud):
     kind = action['kind']
     expected_spent = 'moves_used' if kind == 'move' else 'rotations_used'
     other_spent = 'rotations_used' if kind == 'move' else 'moves_used'
-    last_player_action = before[other_spent] == 1
+    last_player_action = _last_action(before, kind)
     enemy = observation.get('scene') == 'enemy_turn'
     boss_entry = observation.get('scene') == 'event_entry' and observation.get('event_type') == 'boss_battle'
     if (enemy or boss_entry) and last_player_action:
@@ -1055,14 +1095,14 @@ def _action_outcome(state, image, observation, hud):
     if hud['plane_index'] != before['plane_index']:
         _stop(state, 'unexpected_plane_during_action_outcome', image)
         return
-    if hud[expected_spent] == 1:
+    if hud[expected_spent] == before[expected_spent] + 1:
         if hud[other_spent] != before[other_spent]:
             _stop(state, 'action_quota_changed_unexpectedly', image)
             return
         _commit_action(state, dict(quota=hud, registered_selection=True,
                                    verified_preview=kind == 'rotate', node_completed=kind == 'move'))
         _progress_ledger(state, hud)
-        if hud['moves_used'] == hud['rotations_used'] == 1:
+        if _quotas_exhausted(hud):
             _enemy_wait(state, before=before, actions_exhausted=True)
         else:
             # A fresh scan also resolves the real player's contact cell after
@@ -1158,7 +1198,7 @@ async def _battle_node_consumed_after_reward(state, app, observation, context, n
     same_round_move = (turn['rounds_remaining'] == before['rounds_remaining']
                        and turn['moves_used'] == before['moves_used'] + 1
                        and turn['rotations_used'] == before['rotations_used'])
-    next_round = (before['rotations_used'] == before['rotations_total']
+    next_round = (_last_action(before, 'move')
                   and turn['rounds_remaining'] == before['rounds_remaining'] - 1
                   and turn['moves_used'] == turn['rotations_used'] == 0)
     if not (same_round_move or next_round):
@@ -1179,6 +1219,7 @@ async def _events(state, app, image, observation):
     formation = observation.get('native') or {}
     formation_level = observation.get('formation_level_id', formation.get('subject_id'))
     formation_seen = is_formation_page(observation)
+    move = state.get('pending_action') or {}
     if (context['event_type'] == 'vortex' and pending.get('kind') == 'option_submit'
             and pending.get('battle_level') and formation_seen and formation_level is not None
             and _stable_scene(state, observation)):
@@ -1200,26 +1241,51 @@ async def _events(state, app, image, observation):
                       else 'vortex_battle_level_mismatch')
             _stop(state, reason, image)
         return
+    if (context['phase'] == 'entry_wait' and context['owner'] == 'player_move_node'
+            and context['event_type'] in {'battle', 'elite_battle'} and context.get('last_player_action')
+            and formation_seen and formation_level is not None and observation.get('formation_boss_encounter') is True
+            and move.get('kind') == 'move' and move['action_id'] == context.get('source_action_id')):
+        if _stable_scene(state, observation):
+            state['event_stack'].pop()
+            _handoff_to_enemy_boss_formation(state, battle_level=formation_level, node_completed=True)
+        return
     if (context['event_type'] in {'battle', 'elite_battle', 'boss_battle'}
             and context['phase'] == 'entry_wait'
             and (observation.get('native') or {}).get('kind') == 'formation_leave'):
         await _settle_for_formation_shortage(state, app, image, observation)
         return
     working = deepcopy(context)
+    if state.get('battle_retry_limit'):
+        working['battle_retry_limit'] = state['battle_retry_limit']
+    if working['event_type'] == 'shop':
+        working['shop_policy'] = state.get('shop_policy') or normalize_shop_policy()
     direct_boss = await _boss_formation_after_reward(state, app, observation, context)
     consumed_node = await _battle_node_consumed_after_reward(state, app, observation, context, now)
     if consumed_node:
         working['trace'].append(dict(action='battle_node_consumed_after_reward', at=now))
         _log(state, 'battle_node_consumed_after_reward', event_type=context['event_type'])
-    step = {'status': 'completed'} if direct_boss or consumed_node else advance_context(working, observation, now)
+    step = ({'status': 'completed'} if direct_boss or consumed_node else
+            advance_context(working, observation, now, event_option_policy=state.get('event_option_policy')))
     if step['status'] == 'input_requested':
         if 'native' in step:
             target = step['native']
+            if (step['action'] == 'battle_start' and state.get('interval_policy', {}).get('fixed_party')
+                    and not state.get('initial_party') and len(observation.get('battle_party') or []) != 5):
+                _stop(state, 'initial_deep_dive_party_unverified', image)
+                return
             status = await _execute_native_choice(app, target)
             if status in {'applied', 'submitted'}:
+                if step['action'] == 'battle_retry_confirm':
+                    state['phase_started'] = now
+                if (step['action'] == 'battle_start' and status == 'submitted'
+                        and state.get('interval_policy', {}).get('fixed_party') and not state.get('initial_party')):
+                    state['initial_party'] = list(observation['battle_party'])
+                    _log(state, 'fixed_party_recorded', roles=state['initial_party'])
                 state['event_stack'][-1] = _jsonable(working)
+                decision = working['flow'].get('option_decision')
                 _log(state, 'native_event_choice', action=step['action'], choice_id=target['id'],
                      panel=target['kind'], revision=target['revision'], status=status,
+                     **({'option_decision': decision} if target['kind'] == 'options' and decision else {}),
                      **observation.get('formation', {}))
         elif await _fresh_click(state, app, step['point'], observation, image):
             state['event_stack'][-1] = _jsonable(working)
@@ -1232,7 +1298,7 @@ async def _events(state, app, image, observation):
         return
     state['event_stack'].pop()
     state['event_history'].append({key: deepcopy(working.get(key)) for key in (
-        'context_id', 'event_type', 'owner', 'source_action_id', 'victory', 'trace')})
+        'context_id', 'event_type', 'owner', 'source_action_id', 'victory', 'trace', 'battle_retries', 'shop_purchases')})
     _log(state, 'event_completed', owner=working['owner'], event_type=working['event_type'])
     if working['owner'] == 'vortex_sub_battle':
         parent = state['event_stack'][-1]
@@ -1275,6 +1341,12 @@ async def _rest(state, app, image, observation):
         _complete_plane(state)
     if state['phase'] not in {'rest_area', 'next_plane_wait'}:
         _phase(state, 'rest_area')
+    if 'interval' in observation:
+        if state['phase'] == 'rest_area':
+            await _manage_interval(state, app, image, observation['interval'])
+        return
+    if state.get('interval_policy'):
+        return
     if (observation.get('native') or {}).get('kind') == 'rest_shortage':
         await _settle_for_shortage(state, app, image, observation)
         return
@@ -1290,6 +1362,116 @@ async def _rest(state, app, image, observation):
     if await _fresh_click(state, app, observation['next_point'], observation, image):
         state['rest_pending'] = dict(at=now, tries=1 if pending is None else pending['tries'] + 1)
         state['expected_next_plane'] = (state['plane_index'] + 1) if state.get('plane_index') else None
+        _invalidate(state, 'rest_continue_requested')
+        _phase(state, 'next_plane_wait')
+
+
+async def _manage_interval(state, app, image, snapshot):
+    policy = state['interval_policy']
+    subject, kind = snapshot['subject_id'], snapshot['kind']
+    work = state.get('interval_work')
+    if work is None:
+        if kind != 'rest_main':
+            _stop(state, 'deep_dive_interval_parent_unverified', image)
+            return
+        work = state['interval_work'] = dict(subject=subject, position=0, purchases={}, operation=None)
+    if work['subject'] != subject:
+        _stop(state, 'deep_dive_interval_changed', image)
+        return
+    signature = [kind, snapshot['revision']]
+    stable = work.get('seen') == signature
+    work['seen'] = signature
+    if not stable or snapshot['status'] != 'ready':
+        return
+    rows = snapshot['rows']
+    controls = {row['action']: row for row in rows if row['action'] != 'buy' and not row['disabled']}
+    row = controls.get('dismiss')
+    initial = state.get('initial_party') if policy['fixed_party'] else None
+    operation = work['operation']
+    if kind == 'rest_main':
+        if work.get('pending'):
+            _stop(state, 'deep_dive_interval_purchase_unverified', image)
+            return
+        if policy['fixed_party'] and initial is None:
+            # In-level entry can start at the first interval after manual play.
+            if len(snapshot.get('party') or []) != 5:
+                _stop(state, 'initial_deep_dive_party_unverified', image)
+                return
+            initial = state['initial_party'] = list(snapshot['party'])
+            _log(state, 'fixed_party_recorded_from_saved_deck', roles=initial)
+        alive = set(snapshot['roster'])
+        missing = len(set(initial) - alive) if initial else 0
+        revive_limit = policy['revive']['limit']
+        revive_left = work['purchases'].get('revive', 0)
+        remaining = policy['order'][work['position']:] if not work.get('budget_exhausted') else []
+        revive_possible = ('revive' in remaining and policy['revive']['enabled'] and 'revive' in controls
+                           and (not revive_limit or missing <= revive_limit - revive_left))
+        if missing and not revive_possible:
+            row = controls['quit']
+            work['restart_reason'] = 'fixed_party_unrecoverable_settled'
+        else:
+            for candidate in remaining:
+                options = policy[candidate]
+                if options['enabled'] and candidate in controls and (candidate != 'revive' or not initial or missing):
+                    row = controls[candidate]
+                    break
+                work['position'] += 1
+        if row is None:
+            can_fill = len(alive) >= 5 if policy['fill_party'] else len(alive.intersection(snapshot['party'])) >= 5
+            ready = not missing if initial else can_fill
+            row = controls.get('continue') if ready else controls['quit']
+            if not ready:
+                work['restart_reason'] = 'interval_shortage_settled'
+    elif row is None:
+        if operation is None or kind != 'rest_' + operation:
+            _stop(state, 'deep_dive_interval_unexpected_panel', image)
+            return
+        pending = work.get('pending')
+        if pending:
+            if (snapshot['balance'] > pending['balance'] - pending['price']
+                    or not purchase_observed(pending, rows)):
+                return
+            work['purchases'][operation] = work['purchases'].get(operation, 0) + 1
+            work.pop('pending')
+            _log(state, 'interval_purchase_confirmed', operation=operation, id=pending['id'],
+                 price=pending['price'], balance=snapshot['balance'])
+            state['phase_started'] = time.monotonic()
+        options = policy[operation]
+        if not options['limit'] or work['purchases'].get(operation, 0) < options['limit']:
+            row = interval_candidate(operation, options, rows, work.get('focused'), initial)
+        if row and row['price'] > snapshot['balance']:
+            _log(state, 'interval_budget_exhausted', operation=operation, id=row['id'],
+                 price=row['price'], balance=snapshot['balance'])
+            work['budget_exhausted'] = True
+            row = None
+        if row is None:
+            row = controls['back']
+
+    if row is None:
+        return
+    action = row['action']
+    target = dict(kind=kind, revision=snapshot['revision'], subject_id=subject,
+                  index=row['index'], id=row['id'], command='confirm')
+    status = await _execute_native_choice(app, target)
+    if status not in {'submitted', 'applied'}:
+        return
+    state['phase_started'] = time.monotonic()
+    _log(state, 'interval_action', operation=operation, action=action, id=row['id'], status=status)
+    if action in policy['order']:
+        work['operation'] = action
+    elif action == 'buy':
+        work['pending'] = dict(row, balance=snapshot['balance'])
+        if operation == 'awake':
+            work['focused'] = row['id']
+    elif action == 'back':
+        work['position'] += 1
+        work['operation'] = None
+    elif action == 'quit':
+        state['shortage_settlement'] = dict(rest_id=subject, submitted=['rest_shortage'],
+                                           reason=work['restart_reason'])
+        _phase(state, 'shortage_settlement')
+    elif action == 'continue':
+        state['expected_next_plane'] = state['plane_index'] + 1 if state.get('plane_index') else None
         _invalidate(state, 'rest_continue_requested')
         _phase(state, 'next_plane_wait')
 
@@ -1369,7 +1551,7 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
         if _stable_scene(state, observation):
             _stop(state, 'insufficient_battle_roles', image)
         return
-    if scene == 'battle_defeat' and not state.get('event_stack'):
+    if scene in {'battle_defeat', 'battle_retry_confirm'} and not state.get('event_stack'):
         _stop(state, 'battle_defeat_without_owner', image)
         return
     choice_reason = observation.get('native_choice_reason')
@@ -1398,7 +1580,7 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
         state['event_stack'].append(context)
         _phase(state, 'event_dispatch')
         return
-    if scene == 'rest_area':
+    if scene in {'rest_area', 'rest_service'}:
         if state['phase'] not in {'plane_transition', 'rest_area', 'next_plane_wait'}:
             _stop(state, 'unexpected_rest_area_without_boss_owner', image)
         else:
@@ -1408,7 +1590,7 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
         if is_formation_page(observation):
             action = state.get('pending_action') or {}
             if (action.get('kind') == 'rotate' and action.get('submitted')
-                    and action['before_hud']['moves_used'] == 1
+                    and _last_action(action['before_hud'], 'rotate')
                     and (action.get('preview_evidence') or {}).get('status') == 'matched'
                     and await _direct_boss_formation_cell(state, app, observation)):
                 _handoff_to_enemy_boss_formation(state, verified_preview=True)
@@ -1463,6 +1645,7 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
                 return
             _adopt_plane(state, hud)
             state.pop('rest_pending', None)
+            state.pop('interval_work', None)
             state.pop('expected_next_plane', None)
             _invalidate(state, 'new_plane_observed')
             _phase(state, 'scan_turn')
@@ -1479,8 +1662,8 @@ async def _advance_state(state, app, state_store, event_bus, image, observation,
             return
         if not _accept_scan_candidate(state, hud, image):
             return
-        state['layout']['planning_state'] = dict(moves_left=hud['moves_total']-hud['moves_used'],
-                                                 rotations_left=hud['rotations_total']-hud['rotations_used'],
+        state['layout']['planning_state'] = dict(moves_left=max(0, hud['moves_total']-hud['moves_used']),
+                                                 rotations_left=max(0, hud['rotations_total']-hud['rotations_used']),
                                                  move_distance=state['layout'].get('move_distance', 1),
                                                  rounds_remaining=hud['rounds_remaining'],
                                                  collected_count=state['collected_count'])
@@ -1690,10 +1873,20 @@ async def advance_deep_dive_planned_run(session_key: str, app: Any = None, ocr: 
         if (not read_operation_options and image is not None
                 and observation.get('scene') not in {'settlement', 'uncertain_settlement'}):
             bridge = app.controller.bridge
-            snapshot = await _owned(asyncio.to_thread(bridge.read_deep_dive_choice))
+            policy = state.get('interval_policy') or {}
+            formation_policy = {}
+            if policy.get('fill_party') is False:
+                formation_policy['formation_fill_enabled'] = False
+            if policy.get('fixed_party') and state.get('initial_party'):
+                formation_policy['initial_party'] = state['initial_party']
+            args = (formation_policy,) if formation_policy else ()
+            snapshot = await _owned(asyncio.to_thread(bridge.read_deep_dive_choice, *args))
             stack = state.get('event_stack') or []
             event_type = 'vortex' if _family(state) == 'vortex' else stack[-1]['event_type'] if stack else None
             observation = observe_choice(observation, snapshot, event_type)
+            native = observation.get('native')
+            if native and native['kind'] in {'formation_start', 'formation_fill', *FORMATION_SETTLEMENT_STEPS}:
+                native.update(formation_policy)
         if state['phase'] == 'read_registration_anchors' and image is not None:
             anchor_task = asyncio.create_task(_owned(asyncio.to_thread(_read_anchor_frame, image, state, observation)))
         raw_hud = {key: None for key in HUD_KEYS}
@@ -1701,6 +1894,7 @@ async def advance_deep_dive_planned_run(session_key: str, app: Any = None, ocr: 
         if (observation.get('valid')
                 and observation.get('scene') not in {'settlement', 'uncertain_settlement'}
                 and native_kind not in {'rest_shortage', 'rest_finish', 'formation_fill', 'formation_start',
+                                        'battle_retry_confirm', 'shop', *INTERVAL_PANELS,
                                         *FORMATION_SETTLEMENT_STEPS}):
             raw_hud = await _read_runtime_hud(app, image, ocr, observation)
             observation = enrich_observation(observation, raw_hud)
@@ -1709,10 +1903,13 @@ async def advance_deep_dive_planned_run(session_key: str, app: Any = None, ocr: 
         state['last_scene'] = observation.get('scene', 'unknown')
         state['last_hud_read'] = _jsonable(raw_hud)
         formation_wait = None
-        if observation.get('native_choice_status') == 'waiting' and is_formation_page(observation):
+        roster_detail = observation.get('formation_roster_detail')
+        if observation.get('native_choice_status') == 'waiting' and (is_formation_page(observation) or roster_detail):
             formation_wait = dict(reason=observation.get('native_wait_reason'),
                                   level_id=observation.get('formation_level_id'),
                                   **observation.get('formation', {}))
+            if roster_detail:
+                formation_wait.update(roster_detail=roster_detail, panel=native_kind)
         if formation_wait != state.get('last_formation_wait'):
             state['last_formation_wait'] = formation_wait
             if formation_wait:

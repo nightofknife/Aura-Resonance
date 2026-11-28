@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+project(aura_deep_dive_solver LANGUAGES CXX)
+
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+add_library(aura_deep_dive_solver SHARED packed_dp.cpp transitions.cpp state_index.cpp pair.cpp quota.cpp)
+target_compile_features(aura_deep_dive_solver PRIVATE cxx_std_17)
+target_link_libraries(aura_deep_dive_solver PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(aura_deep_dive_solver PRIVATE /arch:AVX2 /fp:precise)
+set_property(TARGET aura_deep_dive_solver PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+list(FILTER CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS INCLUDE REGEX "/vcomp140\\.dll$")
+if(NOT CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+    message(FATAL_ERROR "The Visual Studio x64 OpenMP redistributable (vcomp140.dll) is required")
+endif()
+
+install(TARGETS aura_deep_dive_solver RUNTIME DESTINATION ".")
+install(FILES ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")

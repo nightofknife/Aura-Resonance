@@ -45,6 +45,7 @@ dist/
 models/
 plans/aura_base/assets/mumu/
 plans/aura_base/assets/windows/aura_wgc_hdr.dll
+plans/resonance_pc/assets/deep_dive_solver/*.dll
 plans/aura_base/src/services/ocr_model/
 *.onnx
 *.pt

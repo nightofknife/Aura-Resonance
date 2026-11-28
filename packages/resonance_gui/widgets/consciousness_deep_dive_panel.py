@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import Signal, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -24,8 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .deep_dive_event_settings import DeepDiveEventSettings
+from .deep_dive_interval_settings import DeepDiveIntervalSettings
+from .deep_dive_shop_settings import DeepDiveShopSettings
 
-_DIVE_DEPTH_LABELS = {1: "Ⅰ", 2: "Ⅱ", 3: "Ⅲ", 4: "Ⅳ", 5: "Ⅴ"}
+_DIVE_DEPTH_LABELS = {1: "Ⅰ", 2: "Ⅱ", 3: "Ⅲ", 4: "Ⅳ", 5: "Ⅴ", 6: "Ⅵ", 7: "Ⅶ"}
+_BATTLE_RETRY_SETTING = "deep_dive/battle_retry_limit"
+_COUNT_FAILED_RUNS_SETTING = "deep_dive/count_failed_runs"
 _OPENING_STRATEGY_LABELS = {
     "source": "源流之策",
     "waxing_waning": "盈缺之策",
@@ -48,7 +54,7 @@ class ConsciousnessDeepDivePanel(QWidget):
     runPlannedRunRequested = Signal(object)
     cancelRequested = Signal()
 
-    def __init__(self, parent: QWidget | None = None, *, developer_mode: bool = False) -> None:
+    def __init__(self, parent: QWidget | None = None, *, developer_mode: bool = False, settings=None) -> None:
         super().__init__(parent)
         self._developer_mode = developer_mode
         self._runner_busy = False
@@ -59,9 +65,9 @@ class ConsciousnessDeepDivePanel(QWidget):
         self._planned_run_snapshot: dict[str, Any] = {}
         self._loop_inputs: dict[str, Any] = {}
         self._loop_completed = 0
-        self._build_ui()
+        self._build_ui(settings)
 
-    def _build_ui(self) -> None:
+    def _build_ui(self, settings) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(9)
@@ -95,7 +101,7 @@ class ConsciousnessDeepDivePanel(QWidget):
         layout.addWidget(self.summary_label)
 
         if not self._developer_mode:
-            loop_note = QLabel("完整循环从活动首页开始，回到首页后才计为完成一局。", self)
+            loop_note = QLabel("完整循环从活动首页开始，结算回到首页后按设置计入次数。", self)
             loop_note.setWordWrap(True)
             layout.addWidget(loop_note)
 
@@ -111,29 +117,65 @@ class ConsciousnessDeepDivePanel(QWidget):
             loop_form.addRow("开局策略", self.opening_strategy_combo)
 
             self.loop_count_spin = QSpinBox(self)
-            self.loop_count_spin.setRange(-1, 2147483647)
+            self.loop_count_spin.setRange(0, 2147483647)
             self.loop_count_spin.setValue(1)
-            loop_form.addRow("循环次数（-1 持续循环）", self.loop_count_spin)
+            self.count_failed_runs_check = QCheckBox("失败局是否记录", self)
+            self.count_failed_runs_check.setToolTip("勾选后，失败且完成结算的局也计入循环次数。")
+            if settings is not None:
+                saved = settings.value(_COUNT_FAILED_RUNS_SETTING, False)
+                self.count_failed_runs_check.setChecked(str(saved).strip().lower() == "true")
+                self.count_failed_runs_check.toggled.connect(
+                    lambda checked: settings.set_value(_COUNT_FAILED_RUNS_SETTING, checked)
+                )
+            loop_count_options = QHBoxLayout()
+            loop_count_options.addWidget(self.loop_count_spin)
+            loop_count_options.addWidget(self.count_failed_runs_check)
+            loop_count_options.addStretch(1)
+            loop_form.addRow("循环次数（0 持续循环）", loop_count_options)
+            self.battle_retry_limit_spin = QSpinBox(self)
+            self.battle_retry_limit_spin.setRange(0, 2147483647)
+            self.battle_retry_limit_spin.setSpecialValueText("0（直接结算）")
+            self.battle_retry_limit_spin.setToolTip("每场分别计数。完整循环在结算后继续下一局。")
+            if settings is not None:
+                try:
+                    self.battle_retry_limit_spin.setValue(int(settings.value(_BATTLE_RETRY_SETTING, 0)))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                self.battle_retry_limit_spin.valueChanged.connect(
+                    lambda value: settings.set_value(_BATTLE_RETRY_SETTING, value)
+                )
+            loop_form.addRow("每场最多重打次数", self.battle_retry_limit_spin)
             layout.addLayout(loop_form)
 
             planned_run_note = QLabel(
                 "从玩家棋盘或位面间隙开始，每回合读取最新棋盘。优先提高期限内遇到奇点的概率，概率相同时尽量多拿灵感。"
-                "队员不足五人时暂停；到达结算后保存结果并保留画面。", self
+                "队员不足五人且无法补位时进入结算。关卡内运行会保留结算画面。", self
             )
             planned_run_note.setWordWrap(True)
             planned_run_note.setProperty("caption", True)
             layout.addWidget(planned_run_note)
             planned_run_options = QHBoxLayout()
-            planned_run_options.addWidget(QLabel("自动运行回合安全上限", self))
+            safety_label = QLabel("自动运行回合安全上限", self)
+            safety_note = ("本次关卡内自动运行跨位面累计完成的棋盘回合数。达到上限后停在关卡内。"
+                           "完整循环的每局使用默认上限 100 回合。")
+            safety_label.setToolTip(safety_note)
+            planned_run_options.addWidget(safety_label)
             self.planned_run_safety_limit_spin = QSpinBox(self)
             self.planned_run_safety_limit_spin.setRange(1, 100)
             self.planned_run_safety_limit_spin.setValue(100)
+            self.planned_run_safety_limit_spin.setToolTip(safety_note)
             planned_run_options.addWidget(self.planned_run_safety_limit_spin)
             planned_run_options.addStretch(1)
             layout.addLayout(planned_run_options)
             self.planned_run_button = QPushButton("关卡内自动运行", self)
             self.planned_run_button.clicked.connect(self._request_planned_run)
             layout.addWidget(self.planned_run_button)
+            self.interval_settings = DeepDiveIntervalSettings(self, settings=settings)
+            layout.addWidget(self.interval_settings)
+            self.shop_settings = DeepDiveShopSettings(self, settings=settings)
+            layout.addWidget(self.shop_settings)
+            self.event_settings = DeepDiveEventSettings(self, settings=settings)
+            layout.addWidget(self.event_settings)
         if self._developer_mode:
             scan_note = QLabel("启用桥接输入器后，从当前棋盘直读六面节点和对象位置，并导出布局报告。", self)
             scan_note.setWordWrap(True)
@@ -235,6 +277,10 @@ class ConsciousnessDeepDivePanel(QWidget):
             return
         self.runPlannedRunRequested.emit({
             "safety_round_limit": self.planned_run_safety_limit_spin.value(),
+            "interval_policy": self.interval_settings.policy(),
+            "shop_policy": self.shop_settings.policy(),
+            "event_option_policy": self.event_settings.policy(),
+            "battle_retry_limit": self.battle_retry_limit_spin.value(),
         })
 
     def begin_planned_run(self) -> None:
@@ -276,7 +322,7 @@ class ConsciousnessDeepDivePanel(QWidget):
             "operation": "执行玩家行动", "operation_outcome": "确认行动结果",
             "verify_move": "核验玩家位置", "event_dispatch": "处理节点事件",
             "enemy_wait": "等待奇点行动", "plane_transition": "等待位面转换",
-            "rest_area": "处理休整区", "next_plane_wait": "等待下一位面棋盘",
+            "rest_area": "处理位面间隙", "next_plane_wait": "等待下一位面棋盘",
             "shortage_settlement": "缺员结算",
             "stopped": "已停止运行",
             "execute": "执行玩家行动", "move": "移动玩家", "rotate": "旋转魔方层",
@@ -475,18 +521,19 @@ class ConsciousnessDeepDivePanel(QWidget):
     def _collect_loop_inputs(self) -> dict[str, Any]:
         return {
             "loop_count": self.loop_count_spin.value(),
+            "count_failed_runs": self.count_failed_runs_check.isChecked(),
             "dive_depth": self.dive_depth_combo.currentData(),
             "opening_strategy": self.opening_strategy_combo.currentData(),
+            "interval_policy": self.interval_settings.policy(),
+            "shop_policy": self.shop_settings.policy(),
+            "event_option_policy": self.event_settings.policy(),
+            "battle_retry_limit": self.battle_retry_limit_spin.value(),
         }
 
     def _request_loop(self) -> None:
         if self._runner_busy or self._task_running:
             return
-        inputs = self._collect_loop_inputs()
-        if inputs["loop_count"] == 0:
-            self._set_result_status("循环次数必须为正整数，或 -1（持续循环）", "error")
-            return
-        self.runLoopRequested.emit(inputs)
+        self.runLoopRequested.emit(self._collect_loop_inputs())
 
     def begin_loop(self) -> None:
         self._mode = "loop"
@@ -503,9 +550,9 @@ class ConsciousnessDeepDivePanel(QWidget):
         count = payload.get("loop_count", self._loop_inputs.get("loop_count"))
         depth = payload.get("dive_depth", self._loop_inputs.get("dive_depth"))
         strategy = payload.get("opening_strategy", self._loop_inputs.get("opening_strategy"))
-        summary = [f"已完成 {completed} 局"]
+        summary = [f"已计入 {completed} 局"]
         if count is not None:
-            summary.append("持续循环" if count == -1 else f"目标 {count} 局")
+            summary.append("持续循环" if count == 0 else f"目标 {count} 局")
         if depth in _DIVE_DEPTH_LABELS:
             summary.append(f"深度{_DIVE_DEPTH_LABELS[depth]}")
         if strategy in _OPENING_STRATEGY_LABELS:
@@ -558,8 +605,12 @@ class ConsciousnessDeepDivePanel(QWidget):
     def _sync_controls(self) -> None:
         idle = not self._runner_busy and not self._task_running
         for name in ("loop_button", "loop_count_spin", "dive_depth_combo", "opening_strategy_combo",
+                     "count_failed_runs_check", "battle_retry_limit_spin",
                      "planned_run_button",
                      "planned_run_safety_limit_spin",
+                     "interval_settings",
+                     "shop_settings",
+                     "event_settings",
                      "scan_button", "plan_button", "plan_strategy_combo", "plan_turn_budget_spin",
                      "plan_layout_button", "plan_latest_button", "plan_layout_edit"):
             control = getattr(self, name, None)

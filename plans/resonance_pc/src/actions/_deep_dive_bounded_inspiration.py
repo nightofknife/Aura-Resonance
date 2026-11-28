@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import numpy as np
 
+from ._deep_dive_native_solver import get_native_solver
 from ._deep_dive_planner_rules import boss_outcomes
 
 
@@ -54,7 +55,10 @@ def _deadline_by_tile(tables, horizon: int, slot_count: int, checkpoint):
 def bounded_reward_choice(options, tables, geo, cube_size, collected, turns, encounter_first, checkpoint):
     """Reward decisions this turn and next, followed by deadline-optimal pursuit."""
     slots = len(geo.moves)
-    probability, moment, tile_p, tile_m, unit = _deadline_by_tile(tables, turns - 1, slots, checkpoint)
+    horizon = turns - 1
+    native = get_native_solver() if horizon <= 10 else None
+    deadline = native.pair_deadline if native is not None else _deadline_by_tile
+    probability, moment, tile_p, tile_m, unit = deadline(tables, horizon, slots, checkpoint)
 
     @lru_cache(maxsize=None)
     def pair_frame(player, boss):
@@ -124,6 +128,7 @@ def bounded_reward_choice(options, tables, geo, cube_size, collected, turns, enc
                    reward_lookahead_successful_total_inspirations=score / total_unit,
                    reward_lookahead_expected_new_inspirations=pickups / 48)
     solver = dict(method="finite_horizon_pair_dp_with_two_reward_turns", state_count=len(probability),
+                  backend="native" if native is not None else "numpy",
                   model_optimality=("exact_deadline_probability_with_bounded_reward_lookahead" if encounter_first
                                     else "bounded_reward_lookahead_then_deadline_pursuit"),
                   probability_arithmetic="integer_numerator_over_48_to_horizon",

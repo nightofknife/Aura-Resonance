@@ -200,6 +200,45 @@ QLabel#deepDiveStatus[resultState="success"] {
     color: #4d6847;
     border-left-color: #77866b;
 }
+QGroupBox#deepDiveIntervalSettings {
+    background: #f0e8d8;
+    border: 1px solid #c9b99d;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding-top: 6px;
+}
+QGroupBox#deepDiveIntervalSettings::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    font-weight: 700;
+}
+QLabel#deepDiveIntervalSectionTitle, QCheckBox#deepDiveIntervalOperationName { font-weight: 700; }
+QFrame#deepDiveIntervalOperation {
+    background: #dce5d6;
+    border: 1px solid #a6b39b;
+    border-radius: 5px;
+}
+QFrame#deepDiveIntervalOperation QPushButton {
+    padding: 3px 12px;
+}
+QLabel#deepDiveIntervalRank {
+    color: #314632;
+    background: #c2d1bb;
+    border-radius: 4px;
+    padding: 3px 7px;
+    font-weight: 700;
+}
+QFrame#deepDiveIntervalOperationOptions {
+    background: #fffaf0;
+    border: 1px solid #d5d7c8;
+    border-radius: 4px;
+}
+QFrame#deepDiveIntervalParty {
+    background: #e8ddca;
+    border: 1px solid #c9b99d;
+    border-radius: 5px;
+}
 QLabel#teamRecommendationStatus[resultState="blocked"],
 QLabel#teamRecommendationStatus[resultState="error"],
 QLabel#deepDiveStatus[resultState="blocked"],

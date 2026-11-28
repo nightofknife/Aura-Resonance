@@ -2,9 +2,12 @@
 #include "deep_dive_event_choices.hpp"
 #include "deep_dive_event_trace.hpp"
 #include "deep_dive_formation.hpp"
+#include "deep_dive_interval.hpp"
+#include "deep_dive_shop.hpp"
 #include "il2cpp.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -34,6 +37,7 @@ struct LuaApi {
   size_t (*raw_length)(LuaState *, int){};
   int (*next)(LuaState *, int){};
   int64_t (*integer)(LuaState *, int, int *){};
+  double (*decimal)(LuaState *, int, int *){};
   int (*boolean)(LuaState *, int){};
   const char *(*string)(LuaState *, int, size_t *){};
   int (*load_string)(LuaState *, const char *){};
@@ -63,6 +67,7 @@ struct LuaApi {
     LUA(raw_length, "rawlen");
     LUA(next, "next");
     LUA(integer, "tointegerx");
+    LUA(decimal, "tonumberx");
     LUA(boolean, "toboolean");
     LUA(string, "tolstring");
     LUA(protected_call, "pcallk");
@@ -121,6 +126,15 @@ struct LuaView {
     const auto index = field(parent, key);
     const auto value = number(index);
     restore(index - 1);
+    return value;
+  }
+  std::optional<double> amount(int parent, const char *key) const {
+    const auto index = field(parent, key);
+    int numeric{};
+    const auto value = api.decimal(state, index, &numeric);
+    restore(index - 1);
+    if (!numeric || !std::isfinite(value) || value < 0)
+      return std::nullopt;
     return value;
   }
   std::optional<int> quota(int model, const char *getter, int argument = 0) const {
@@ -230,27 +244,22 @@ void read_items(const LuaView &lua, int cell, int face, int row, int col,
   }
   lua.restore(items - 1);
 }
-std::optional<int> read_move_distance(const LuaView &lua, int model, int config) {
-  const auto base = lua.number(config, "initialDistance");
-  if (!base)
-    return std::nullopt;
+std::optional<int> read_item_attr(const LuaView &lua, int model, const char *name) {
   const auto stack = lua.top();
   const auto manager = lua.field(model, "itemAttrManager");
   const auto globals = lua.at(registry, 2);
   const auto kinds = lua.type(globals) == lua_table ? lua.field(globals, "Enum_RogueItemOrderType") : 0;
-  const auto key = kinds && lua.type(kinds) == lua_table ? lua.field(kinds, "StepDistanceItem") : 0;
-  const auto bonus = key && lua.type(key) != lua_nil && lua.type(manager) == lua_table
+  const auto key = kinds && lua.type(kinds) == lua_table ? lua.field(kinds, name) : 0;
+  const auto value = key && lua.type(key) != lua_nil && lua.type(manager) == lua_table
                          ? lua.quota(manager, "GetAttr", key) : std::nullopt;
   lua.restore(stack);
-  if (!bonus || *bonus > std::numeric_limits<int>::max() - *base)
-    return std::nullopt;
-  return *base + *bonus;
+  return value;
 }
 
 Json read_turn(const LuaView &lua, int model) {
   const auto config = lua.field(model, "cfg");
   const auto plane = lua.type(config) == lua_table ? lua.number(config, "faceIndex") : std::nullopt;
-  const auto move_distance = plane ? read_move_distance(lua, model, config) : std::nullopt;
+  const auto base_distance = plane ? lua.number(config, "initialDistance") : std::nullopt;
   lua.restore(config - 1);
   if (!plane || *plane < 1)
     throw Error("deep_dive_turn_unavailable", "Deep Dive plane index is unavailable");
@@ -271,8 +280,20 @@ Json read_turn(const LuaView &lua, int model) {
           {"moves_left", std::max(*total_moves - *moves, 0)},
           {"rotations_used", *rotations}, {"rotations_total", *total_rotations},
           {"rotations_left", std::max(*total_rotations - *rotations, 0)}};
-  if (move_distance)
-    turn["move_distance"] = *move_distance;
+  const auto bonus_distance = read_item_attr(lua, model, "StepDistanceItem");
+  if (base_distance && *base_distance > 0 && bonus_distance
+      && *bonus_distance <= std::numeric_limits<int>::max() - *base_distance) {
+    turn["base_move_distance"] = *base_distance;
+    turn["move_distance"] = *base_distance + *bonus_distance;
+  }
+  if (const auto base = lua.number(model, "maxMoveNum"))
+    turn["base_moves"] = *base;
+  if (const auto base = lua.number(model, "maxRotNum"))
+    turn["base_rotations"] = *base;
+  if (const auto reduction = read_item_attr(lua, model, "DecMonsterStepNum"))
+    turn["boss_moves"] = *reduction == 0 ? 1 : 0;
+  if (const auto reduction = read_item_attr(lua, model, "DecMonsterSpinNum"))
+    turn["boss_rotations"] = *reduction == 0 ? 1 : 0;
   return turn;
 }
 
@@ -406,8 +427,7 @@ Json perform_action(LuaState *state, const Json &args) {
     const auto turn = read_turn(lua, model);
     const auto &expected = args.at("turn");
     move_distance = turn.value("move_distance", 0);
-    if (move_distance < 1 || move_distance > 2 ||
-        move_distance != args.value("move_distance", move_distance))
+    if (move_distance < 1 || move_distance != args.value("move_distance", move_distance))
       throw Error("deep_dive_action_state_changed", "Deep Dive move distance is unavailable or changed before input");
     if (size != args.value("cube_size", size) ||
         !map_id || *map_id != args.at("map_id").get<int>() || lua.type(role) != lua_table ||
@@ -469,10 +489,18 @@ Json read_event_trace(LuaState *state, const std::string &mode) {
   if (trace["status"] != "active")
     return trace;
 
-  for (auto key : {"round", "moves", "rotations", "option_event_id", "option_state"})
+  for (auto key : {"round", "moves", "rotations", "option_event_id", "option_state", "pending_rewards"})
     if (auto value = lua.number(result, key))
       trace[key] = *value;
-  trace["need_start_round"] = lua.flag(result, "need_start_round");
+  for (auto key : {"need_start_round", "need_trigger_round_end", "role_moving", "awaiting_reward_trigger",
+                   "option_panel_visible", "option_controls_visible", "network_busy", "response_tracking"}) {
+    const int value = lua.field(result, key);
+    if (lua.type(value) == lua_boolean)
+      trace[key] = lua.api.boolean(state, value) != 0;
+    lua.restore(result);
+  }
+  if (auto url = lua.text(result, "panel_url"); !url.empty())
+    trace["panel_url"] = std::move(url);
   for (auto key : {"player", "selected"}) {
     const int cell = lua.field(result, key);
     if (lua.type(cell) == lua_table) {
@@ -480,6 +508,8 @@ Json read_event_trace(LuaState *state, const std::string &mode) {
       for (auto field : {"face", "row", "col", "template_id", "event_id"})
         if (auto value = lua.number(cell, field))
           position[field] = *value;
+      for (auto field : {"has_template", "has_special_item"})
+        position[field] = lua.flag(cell, field);
       trace[key] = std::move(position);
     }
     lua.restore(result);
@@ -495,7 +525,7 @@ Json read_event_trace(LuaState *state, const std::string &mode) {
         for (auto key : {"sequence", "request", "event_id"})
           if (auto value = lua.number(row, key))
             record[key] = *value;
-        for (auto key : {"stage", "protocol", "coord"})
+        for (auto key : {"stage", "protocol", "coord", "response_code"})
           if (auto value = lua.text(row, key); !value.empty())
             record[key] = std::move(value);
         trace["records"].push_back(std::move(record));
@@ -516,16 +546,34 @@ Json perform_choice(LuaState *state, const Json &args) {
   const int subject = read ? 0 : args.at("subject_id").get<int>();
   const int index = read ? 0 : args.at("index").get<int>();
   const int id = read ? 0 : args.at("id").get<int>();
+  const bool service = kind == "rest_main" || kind == "rest_recruit" ||
+                       kind == "rest_revive" || kind == "rest_intensify" ||
+                       kind == "rest_awake" || kind == "rest_feedback" ||
+                       kind == "shop" || kind == "shop_feedback";
+  constexpr int service_limit = 1024;
+  const bool allow_fill = args.value("formation_fill_enabled", true);
+  std::string fixed_party;
+  if (const auto requested = args.find("initial_party"); requested != args.end()) {
+    if (!requested->is_array() || requested->size() != 5)
+      throw Error("deep_dive_choice_invalid", "Invalid fixed Deep Dive party");
+    for (const auto &role : *requested) {
+      if (!role.is_number_integer() || role.get<int>() < 1)
+        throw Error("deep_dive_choice_invalid", "Invalid fixed Deep Dive role");
+      fixed_party += std::to_string(role.get<int>()) + ",";
+    }
+  }
   const bool selection = kind == "options" || kind == "cards";
   const bool direct_confirm = kind == "battle_defeat" || kind == "battle_victory" ||
+                              kind == "battle_retry_confirm" ||
                               kind == "rest_shortage" || kind == "rest_finish" ||
                               kind == "formation_fill" || kind == "formation_start" ||
                               kind == "formation_leave" || kind == "formation_quit" ||
-                              kind == "formation_finish";
+                              kind == "formation_finish" || service;
   const bool supported = selection ? command != "discard" :
                          (kind == "replacement" && command == "discard") ||
                          (direct_confirm && command == "confirm");
-  if (!read && (revision < 1 || subject < 1 || index < 1 || index > 4 || id < 1 ||
+  if (!read && (revision < 1 || subject < 1 || index < 1 ||
+                index > (service ? service_limit : 4) || id < 1 ||
                 !supported))
     throw Error("deep_dive_choice_invalid", "Invalid Deep Dive choice target");
 
@@ -540,7 +588,8 @@ Json perform_choice(LuaState *state, const Json &args) {
     lua.api.raw_set(state, registry);
   }
   static const auto script = std::string(deep_dive_choice_prelude) + deep_dive_reward_choice_script +
-                             deep_dive_formation_script + deep_dive_event_choice_script;
+                             deep_dive_formation_script + deep_dive_interval_script +
+                             deep_dive_shop_script + deep_dive_event_choice_script;
   if (lua.api.load_string(state, script.c_str()) != 0)
     throw Error("deep_dive_choice_failed", "Could not load the Deep Dive choice handler");
   lua.api.push_value(state, tracking);
@@ -549,7 +598,9 @@ Json perform_choice(LuaState *state, const Json &args) {
   lua.api.push_string(state, kind.c_str());
   for (const int value : {subject, index, id})
     lua.api.push_integer(state, value);
-  if (lua.api.protected_call(state, 7, 1, 0, 0, nullptr) != 0) {
+  lua.api.push_integer(state, allow_fill ? 1 : 0);
+  lua.api.push_string(state, fixed_party.c_str());
+  if (lua.api.protected_call(state, 9, 1, 0, 0, nullptr) != 0) {
     size_t size{};
     const auto error = lua.api.string(state, lua.top(), &size);
     throw Error("deep_dive_choice_failed", error ? std::string(error, std::min(size_t(240), size))
@@ -564,12 +615,40 @@ Json perform_choice(LuaState *state, const Json &args) {
     return {{"status", status}};
   Json snapshot = {{"schema", "resonance_pc.deep_dive_choice.v1"}, {"status", status},
                    {"kind", lua.text(result, "kind")}};
-  for (const auto field : {"reason", "wait_reason"})
+  for (const auto field : {"reason", "wait_reason", "roster_detail"})
     if (auto value = lua.text(result, field); !value.empty())
       snapshot[field] = std::move(value);
   for (const auto field : {"selected_count", "available_count", "required_count"})
     if (const auto value = lua.number(result, field))
       snapshot[field] = *value;
+  if (lua.flag(result, "boss_encounter"))
+    snapshot["boss_encounter"] = true;
+  const auto observed_kind = snapshot.at("kind").get<std::string>();
+  if (observed_kind == "shop") {
+    if (const auto value = lua.amount(result, "balance"))
+      snapshot["balance"] = *value;
+  } else if (const auto value = lua.number(result, "balance")) {
+    snapshot["balance"] = *value;
+  }
+  for (const auto field : {"party", "roster"}) {
+    const auto list = lua.field(result, field);
+    if (lua.type(list) == lua_table) {
+      const auto count = lua.api.raw_length(state, list);
+      if (count > service_limit)
+        throw Error("deep_dive_choice_failed", "Invalid Deep Dive party or roster");
+      snapshot[field] = Json::array();
+      for (int position = 1; position <= int(count); ++position) {
+        const auto member = lua.at(list, position);
+        int is_number = 0;
+        const auto value = lua.api.integer(state, member, &is_number);
+        if (!is_number || value < 1)
+          throw Error("deep_dive_choice_failed", "Invalid Deep Dive roster entry");
+        snapshot[field].push_back(value);
+        lua.restore(list);
+      }
+    }
+    lua.restore(result);
+  }
   const auto trace_mode = args.value("event_trace", std::string{});
   if (trace_mode == "sample" || trace_mode == "stop")
     snapshot["event_trace"] = read_event_trace(state, trace_mode);
@@ -582,7 +661,9 @@ Json perform_choice(LuaState *state, const Json &args) {
   const auto observed_revision = lua.number(result, "revision").value_or(0);
   const int rows = lua.field(result, "rows");
   const auto count = lua.type(rows) == lua_table ? lua.api.raw_length(state, rows) : 0;
-  if (!observed_revision || !observed_subject || count == 0 || count > 4)
+  const bool observed_service = observed_kind == "shop" || observed_kind.rfind("rest_", 0) == 0;
+  if (!observed_revision || !observed_subject || count == 0 ||
+      count > (observed_service ? size_t(service_limit) : 4))
     throw Error("deep_dive_choice_failed", "Invalid Deep Dive choice list");
   snapshot["revision"] = observed_revision;
   snapshot["subject_id"] = observed_subject;
@@ -594,9 +675,24 @@ Json perform_choice(LuaState *state, const Json &args) {
     const auto option_id = lua.number(row, "id").value_or(0);
     if (!option_id)
       throw Error("deep_dive_choice_failed", "Missing Deep Dive choice ID");
-    snapshot["rows"].push_back({{"id", option_id}, {"index", position},
-                                 {"disabled", lua.flag(row, "disabled")},
-                                 {"selected", lua.flag(row, "selected")}});
+    Json choice = {{"id", option_id}, {"index", position},
+                   {"disabled", lua.flag(row, "disabled")}, {"selected", lua.flag(row, "selected")}};
+    const auto recommended = lua.field(row, "recommended");
+    if (lua.type(recommended) == lua_boolean)
+      choice["recommended"] = bool(lua.api.boolean(lua.state, recommended));
+    lua.restore(row);
+    if (auto action = lua.text(row, "action"); !action.empty())
+      choice["action"] = std::move(action);
+    for (const auto field : {"level", "awake", "max_awake", "purchased"})
+      if (const auto value = lua.number(row, field))
+        choice[field] = *value;
+    if (observed_kind == "shop") {
+      if (const auto value = lua.amount(row, "price"))
+        choice["price"] = *value;
+    } else if (const auto value = lua.number(row, "price")) {
+      choice["price"] = *value;
+    }
+    snapshot["rows"].push_back(std::move(choice));
     lua.restore(rows);
   }
   return snapshot;

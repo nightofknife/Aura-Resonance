@@ -15,9 +15,9 @@ def init():
     return s
 
 
-def stable(s,o,t):
-    flow.step(s,o,t)
-    return flow.step(s,o,t+.4)
+def stable(s,o,t, **kwargs):
+    flow.step(s,o,t, **kwargs)
+    return flow.step(s,o,t+.4, **kwargs)
 
 
 def row(supported=True,blocked=False,priority=10,state='normal',title='奖励'):
@@ -143,6 +143,48 @@ def test_prototype_rejects_an_unexpected_followup():
     stable(state, native_options(89800085), 1)
     stable(state, native_options(89800085, selected=86100298), 2)
     assert stable(state, native_options(89800079, revision=2), 3) == ('vortex_blocked', None)
+
+
+def test_custom_order_can_prefer_native_battle_and_skip_unavailable_options():
+    prefs = {'防御系统故障': {'order': [86100252, 86100253], 'disabled': []}}
+    state = init()
+    assert stable(state, native_options(89800040), 1, event_option_policy=prefs)[1]['id'] == 86100252
+    step = stable(state, native_options(89800040, disabled=[86100252]), 2, event_option_policy=prefs)
+    assert step[1]['id'] == 86100253
+    assert state['option_decision']['skipped'][0]['reason'] == 'game_disabled'
+
+
+def test_custom_order_for_multilayer_event_uses_the_current_page():
+    prefs = {'原型机': {'order': [86100301, 86100298, 86100299, 86100297], 'disabled': [86100301]}}
+    state = init()
+    assert stable(state, native_options(89800085), 1, event_option_policy=prefs)[1]['id'] == 86100298
+    submit = native_options(89800085, selected=86100298)
+    assert stable(state, submit, 2, event_option_policy=prefs)[0] == 'vortex_option_submit'
+    followup = native_options(89800086, revision=2)
+    assert stable(state, followup, 3, event_option_policy=prefs)[1]['id'] == 86100299
+    assert state['option_decision']['event_id'] == 89800086
+    assert state['option_decision']['skipped'][0]['reason'] == 'user_disabled'
+
+
+def test_known_disabled_followup_is_skipped_before_entering_it():
+    prefs = {'原型机': {'order': [86100298], 'disabled': [86100299, 86100300, 86100301]}}
+    state = init()
+    assert stable(state, native_options(89800085), 1, event_option_policy=prefs)[1]['id'] == 86100297
+    assert state['option_decision']['skipped'][0]['reason'] == 'followup_all_disabled'
+
+
+def test_multilayer_event_with_no_available_option_stops_and_records_reasons():
+    prefs = {'原型机': {'disabled': [86100299]}}
+    state = init()
+    assert stable(state, native_options(89800085), 1, event_option_policy=prefs)[1]['id'] == 86100298
+    submit = native_options(89800085, selected=86100298)
+    assert stable(state, submit, 2, event_option_policy=prefs)[0] == 'vortex_option_submit'
+    followup = native_options(89800086, revision=2, disabled=[86100300, 86100301])
+    assert stable(state, followup, 3, event_option_policy=prefs) == ('vortex_blocked', None)
+    assert state['option_decision']['selected_id'] is None
+    assert {r['id']: r['reason'] for r in state['option_decision']['skipped']} == {
+        86100299: 'user_disabled', 86100300: 'game_disabled', 86100301: 'game_disabled',
+    }
 
 
 def test_mixed_reward_dismisses_both_awards_before_returning_to_board():

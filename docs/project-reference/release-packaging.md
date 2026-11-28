@@ -27,6 +27,10 @@ into the Aura Base Plan and is not tracked by Git. To run the Resonance PC
 capture path from a source checkout, run `./tools/native/wgc_hdr/build.ps1`
 once from the repository root. Players do not need build tools.
 
+Both full packages also build and include the Deep Dive solver DLL and its
+x64 OpenMP redistributable. To build that solver for a source checkout, run
+`pwsh -File tools/native/deep_dive_solver/build.ps1` from the repository root.
+
 ## Canonical commands
 
 ```powershell

@@ -67,6 +67,42 @@ def test_native_battle_waits_three_minutes_for_unclassified_combat():
     assert advance_context(context, combat, 181)['reason'] == 'battle_start_transition_timeout'
 
 
+def test_roster_failure_detail_is_logged_without_changing_wait_status(monkeypatch):
+    state = run_state()
+    state.update(phase_started=time.monotonic(), terminal_reached=False)
+    snapshot = dict(
+        kind='formation_start', status='waiting', subject_id=20102299,
+        wait_reason='formation_roster_unavailable', roster_detail='empty_role_key',
+        selected_count=4, required_count=5,
+    )
+    bridge = SimpleNamespace(read_deep_dive_choice=Mock(return_value=snapshot))
+    app = SimpleNamespace(get_window_size=lambda: (1280, 720), controller=SimpleNamespace(bridge=bridge))
+    advance = AsyncMock()
+    log = Mock()
+    monkeypatch.setattr(runtime, '_load', AsyncMock(return_value=state))
+    monkeypatch.setattr(runtime, '_capture', AsyncMock(return_value=(object(), {'scene': 'battle_formation'})))
+    monkeypatch.setattr(runtime, '_read_runtime_hud', AsyncMock(return_value={}))
+    monkeypatch.setattr(runtime, '_advance_state', advance)
+    monkeypatch.setattr(runtime, '_save', AsyncMock())
+    monkeypatch.setattr(runtime, '_log', log)
+    monkeypatch.setattr(runtime, '_cancel_check', lambda: None)
+
+    async def run():
+        for _ in range(2):
+            result = await runtime.advance_deep_dive_planned_run('fixture', app=app)
+            assert result['status'] == 'running'
+
+    asyncio.run(run())
+    observation = advance.await_args.args[5]
+    assert observation['native_choice_reason'] is None
+    assert observation['native_wait_reason'] == 'formation_roster_unavailable'
+    log.assert_called_once_with(
+        state, 'native_formation_wait', reason='formation_roster_unavailable',
+        level_id=20102299, selected_count=4, required_count=5,
+        roster_detail='empty_role_key', panel='formation_start',
+    )
+
+
 @pytest.mark.parametrize('mismatch', [None, 'map', 'plane', 'position', 'quota', 'formation_level'])
 def test_enemy_turn_direct_boss_formation_requires_matching_board(mismatch):
     cell = dict(face=5, row=2, col=2)
@@ -111,6 +147,38 @@ def test_enemy_turn_direct_boss_formation_requires_matching_board(mismatch):
             assert state['reason'] == 'boss_formation_level_mismatch'
         else:
             assert state['phase'] == 'enemy_wait' and not state['event_stack']
+
+
+def test_last_move_elite_node_hands_native_boss_formation_to_plane_transition(monkeypatch, tmp_path):
+    level = 20101778
+    formation = observe_choice({}, dict(
+        kind='formation_start', status='ready', revision=1, subject_id=level, boss_encounter=True,
+        rows=[dict(id=level, index=1, disabled=False, selected=False)],
+    ), 'elite_battle')
+    victory = panel('battle_victory', level=level, revision=2)
+    rest_area = dict(valid=True, scene='rest_area')
+    state = run_state()
+    state['event_stack'][0].update(event_type='elite_battle', last_player_action=True, source_action_id='move')
+    state.update(pending_action=dict(kind='move', action_id='move'), actions=[], event_history=[],
+                 map_revision=26, pose_epoch=2, output_dir=str(tmp_path))
+    submit = AsyncMock(return_value='submitted')
+    monkeypatch.setattr(runtime, '_execute_native_choice', submit)
+    now = runtime.time.monotonic()
+    monkeypatch.setattr(runtime, 'time', SimpleNamespace(monotonic=lambda: now, time=time.time))
+
+    async def run():
+        nonlocal now
+        for observation in (formation, formation, formation, formation, victory, victory, rest_area, rest_area):
+            now += 1
+            await runtime._events(state, None, None, observation)
+
+    asyncio.run(run())
+    assert state['phase'] == 'plane_transition' and state['awaiting_plane_end']
+    assert state['pending_action'] is None and len(state['actions']) == 1
+    assert [(event['event_type'], event['owner'], event['victory']) for event in state['event_history']] == [
+        ('boss_battle', 'enemy_move_encounter', True),
+    ]
+    assert [call.args[1]['kind'] for call in submit.await_args_list] == ['formation_start', 'battle_victory']
 
 
 def test_shortage_leaves_formation_and_submits_settlement_once(monkeypatch):
@@ -177,7 +245,7 @@ def test_restart_requires_activity_home_and_does_not_use_run_quota(home_verified
             for stage, field, data in (
                 ('entry', 'deep_dive', dict(page_state='deep_dive_board')),
                 ('single', 'deep_dive_planned_run', dict(terminal_reached=True, terminal='settlement',
-                                                       reason='settlement_observed')),
+                                                       reason='settlement_observed', game_success=True)),
                 ('cleanup', 'deep_dive_cleanup', dict(page_state='deep_dive_activity_home')),
             ):
                 await loop.checkpoint_loop('test', stage, {field: dict(status='completed', success=True, **data)},

@@ -9,11 +9,18 @@ from packages.aura_core.observability.runtime_trace import tracked_to_thread
 from packages.aura_core.scheduler.cancellation import is_current_task_cancel_requested
 from packages.aura_core.scheduler.utils import resolve_base_path
 from packages.aura_core.utils.exceptions import StopTaskException
+from packages.resonance_shared.deep_dive_interval import normalize_interval_policy
+from packages.resonance_shared.deep_dive_shop import normalize_shop_policy
+from packages.resonance_shared.deep_dive_event_options import normalize_event_option_policy
 from ._deep_dive_cleanup_vision import observe
 from ._deep_dive_opening_options import DEFAULT_DIVE_DEPTH, DEFAULT_OPENING_STRATEGY, validate_opening_options
 
 SCHEMA='resonance_pc.deep_dive_loop.v1'
 PROGRESS='task.resonance_pc_deep_dive_loop_progress'
+_SHORTAGE_SETTLEMENT_REASONS = {
+    'formation_shortage_settled', 'interval_shortage_settled',
+    'fixed_party_unrecoverable_settled', 'insufficient_battle_roles_settled',
+}
 
 
 def cancel_check():
@@ -21,8 +28,9 @@ def cancel_check():
 
 
 def validate_count(value):
-    if isinstance(value,bool) or not isinstance(value,(int,float)) or int(value)!=value or value==0 or value < -1:
-        raise ValueError('循环次数必须是正整数，或 -1（持续循环）')
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+            or (isinstance(value, float) and not value.is_integer())):
+        raise ValueError('循环次数必须是非负整数，0 表示持续循环')
     return int(value)
 
 
@@ -38,12 +46,19 @@ def successful(stage,payload):
     return payload.get('page_state')=='deep_dive_activity_home'
 
 
+def _counts_towards_target(result, count_failed_runs):
+    if result.get('reason') in _SHORTAGE_SETTLEMENT_REASONS:
+        return count_failed_runs
+    game_success = result.get('game_success')
+    return game_success is True or (count_failed_runs and game_success is False)
+
+
 async def save(state,store,bus):
     state['sequence']+=1
     await store.set(state['session_key'],dict(state))
     if bus:
         payload = {key: state[key] for key in (
-            'cid', 'sequence', 'loop_count', 'dive_depth', 'opening_strategy',
+            'cid', 'sequence', 'loop_count', 'count_failed_runs', 'dive_depth', 'opening_strategy',
             'completed_runs', 'run_index', 'stage', 'status', 'reason', 'reason_code', 'last_frame',
         )}
         payload['schema']=SCHEMA
@@ -54,6 +69,9 @@ async def save(state,store,bus):
 async def load(key,store):
     s=await store.get(key)
     if not isinstance(s,dict) or s.get('schema')!=SCHEMA or s.get('session_key')!=key:raise RuntimeError('循环会话不存在')
+    if s.get('loop_count') == -1:
+        s['loop_count'] = 0
+    s.setdefault('count_failed_runs', False)
     s.setdefault('dive_depth', DEFAULT_DIVE_DEPTH)
     s.setdefault('opening_strategy', DEFAULT_OPENING_STRATEGY)
     s.setdefault('reason_code', '')
@@ -65,17 +83,28 @@ async def load(key,store):
 @requires_services(app='plans/aura_base/app',state_store='core/state_store',event_bus='core/event_bus')
 async def initialize_loop(
     loop_count: int = 1, app=None, state_store=None, event_bus=None,
-    dive_depth: int = 1, opening_strategy: str = 'source',
+    dive_depth: int = 1, opening_strategy: str = 'source', interval_policy: dict | None = None,
+    battle_retry_limit: int = 0, shop_policy: dict | None = None, event_option_policy: list | None = None,
+    count_failed_runs: bool = False,
 ):
     count = validate_count(loop_count)
     depth, strategy = validate_opening_options(dive_depth, opening_strategy)
+    if not isinstance(count_failed_runs, bool):
+        raise ValueError('失败局是否记录必须是布尔值')
+    if type(battle_retry_limit) is not int or battle_retry_limit < 0:
+        raise ValueError('战败重打次数必须是非负整数')
     cancel_check()
     key = 'deep_dive_loop:' + uuid4().hex
     s = {
         'schema': SCHEMA, 'session_key': key, 'cid': str(current_cid() or ''), 'sequence': 0,
-        'loop_count': count, 'dive_depth': depth, 'opening_strategy': strategy,
+        'loop_count': count, 'count_failed_runs': count_failed_runs,
+        'dive_depth': depth, 'opening_strategy': strategy,
         'completed_runs': 0, 'run_index': 0, 'stage': 'ready', 'status': 'running',
         'reason': '', 'reason_code': '', 'last_frame': '', 'last_result': {},
+        'interval_policy': normalize_interval_policy(interval_policy),
+        'shop_policy': normalize_shop_policy(shop_policy),
+        'event_option_policy': normalize_event_option_policy(event_option_policy),
+        'battle_retry_limit': battle_retry_limit,
     }
     image=None
     for _ in range(2):
@@ -132,10 +161,11 @@ async def checkpoint_loop(session_key:str,stage:str,child_result:dict,state_stor
                 'outcome', 'game_success', 'turns_completed', 'reason', 'last_frame', 'final_frame', 'report_path',
             )}}
         else:
-            if s['last_result'].get('reason') != 'formation_shortage_settled':
+            if _counts_towards_target(s['last_result'], s['count_failed_runs']):
                 s['completed_runs']+=1
             s['stage']='activity_home';s['last_frame']=result.get('last_frame','')
-            if s['loop_count']!=-1 and s['completed_runs']>=s['loop_count']:s['status']='completed'
+            if s['loop_count'] > 0 and s['completed_runs'] >= s['loop_count']:
+                s['status'] = 'completed'
     if stage=='single':
         child_key=result.get('session_key','')
         if isinstance(child_key,str) and child_key.startswith('deep_dive_planned_run:'):
@@ -153,7 +183,7 @@ async def checkpoint_loop(session_key:str,stage:str,child_result:dict,state_stor
 async def loop_result(session_key:str,release:bool=False,state_store=None):
     s=await load(session_key,state_store)
     out = {key: s[key] for key in (
-        'status', 'stage', 'loop_count', 'dive_depth', 'opening_strategy',
+        'status', 'stage', 'loop_count', 'count_failed_runs', 'dive_depth', 'opening_strategy',
         'completed_runs', 'run_index', 'reason', 'reason_code', 'last_frame', 'last_result',
     )}
     out['success']=s['status']=='completed'

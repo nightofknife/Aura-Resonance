@@ -106,7 +106,7 @@ def test_scan_turn_uses_native_board_with_legacy_route_settings(tmp_path, monkey
         received.append(True)
         player_row = 1 if len(received) == 1 else 2
         return dict(schema='resonance_pc.deep_dive_board.v1', coordinate_base=1, size=3,
-                    turn=dict(hud, rounds_remaining=4 if changed else hud['rounds_remaining'], move_distance=1),
+                    turn=dict(hud, rounds_remaining=4 if changed else hud['rounds_remaining'], move_distance=3),
                     faces=[dict(face=face, rows=[[dict(type='empty') for _ in range(3)]
                                                  for _ in range(3)]) for face in range(1, 7)],
                     objects=[dict(type='player', face=2, row=player_row, col=2),
@@ -127,6 +127,7 @@ def test_scan_turn_uses_native_board_with_legacy_route_settings(tmp_path, monkey
         assert 'scan_candidate' not in state
         return
     assert state['phase'] == 'accept_scan' and state['scan_candidate']['coordinate_frame'] == 'native_board'
+    assert state['scan_candidate']['move_distance'] == 3
     assert state['scan_candidate']['player_cell'] == dict(face='F', row=1, col=0)
     assert state['scan_candidate']['singularity_cell'] == dict(face='F', row=1, col=2)
     assert state['layout'] is None and state['input_owner'] is None

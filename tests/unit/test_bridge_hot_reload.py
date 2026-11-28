@@ -1,6 +1,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from threading import Event
 from types import SimpleNamespace
 from uuid import uuid4
@@ -82,6 +83,43 @@ def test_bridge_waits_for_host_swap_before_hello(monkeypatch, tmp_path):
     assert calls[-1] == "close"
     service.close(unload=True)
     assert calls[-1] == "unload_host"
+
+
+def test_deep_dive_choice_collects_diagnostics_without_changing_choice(monkeypatch):
+    monkeypatch.delenv("AURA_DEEP_DIVE_EVENT_TRACE", raising=False)
+    monkeypatch.delenv("AURA_GUI_INPUT_BRIDGE", raising=False)
+    service = input_bridge_service.ResonancePcInputBridgeService(config={"resonance_pc.input.mode": "bridge"})
+    monkeypatch.setattr(service, "_ready", lambda: None)
+    service._capabilities = {"deep_dive_choices": True}
+    choice = {"schema": "resonance_pc.deep_dive_choice.v1", "kind": "none", "status": "waiting",
+              "wait_reason": "network_busy"}
+    snapshot = {"status": "active", "option_panel_visible": False, "role_moving": False}
+    protocols = [{"stage": "response_received", "protocol": "cube.event", "response_code": "undisplay"}]
+    frames = iter([dict(snapshot, records=protocols), snapshot, snapshot])
+    calls = []
+
+    def request(op, args=None, **_):
+        calls.append((op, args))
+        if args == {"command": "read", "event_trace": "sample"}:
+            return {"result": {"choice": dict(choice, event_trace=deepcopy(next(frames)))}}
+        return {"result": {}}
+
+    service._client = SimpleNamespace(request=request)
+    logs = []
+    monkeypatch.setattr(input_bridge_service, "log_event", lambda event, **data: logs.append((event, data)))
+    assert service.read_deep_dive_choice() == choice
+    assert service.read_deep_dive_choice() == choice
+    choice["wait_reason"] = "client_transition"
+    assert service.read_deep_dive_choice() == choice
+    traces = [data for event, data in logs if event == "deep_dive.event_trace"]
+    assert len(traces) == 2
+    assert traces[0]["records"] == protocols
+    assert traces[1]["snapshot"]["choice_wait_reason"] == "client_transition"
+    service.close()
+    assert calls[-2:] == [("deep_dive_choice", {"command": "read", "event_trace": "stop"}),
+                          ("close", None)]
+    monkeypatch.setenv("AURA_DEEP_DIVE_EVENT_TRACE", "0")
+    assert not input_bridge_service.ResonancePcInputBridgeService(config={})._deep_dive_trace
 
 
 def test_old_host_instance_rejection_does_not_mark_input_uncertain():

@@ -64,7 +64,10 @@ reader reports `deep_dive_board_busy`.
 `turn` is captured with the board and includes the current plane index from the
 client's `cfg.faceIndex`, plus used, total and remaining counts for rounds,
 moves and rotations. The totals include the client's active action
-bonuses. Remaining rounds follow the on-screen calculation
+bonuses. The move distance combines `cfg.initialDistance` and the current
+`StepDistanceItem` bonus. The snapshot includes the baseline player quotas
+and distance for later rounds, and the current enemy quotas after applying
+`DecMonsterStepNum` and `DecMonsterSpinNum`. Remaining rounds follow the on-screen calculation
 `GetMaxRoundNum() - stepNum`, bounded at zero for an exhausted deadline.
 Pass `turn_only: true` to the same RPC for counters alone during a board
 transition or a rotation preview.
@@ -83,15 +86,35 @@ confirmation and outcome normally.
 
 `deep_dive_choice` reads the active event option, reward card or full-inventory
 panel. The snapshot returns ordered IDs, availability, selected state and a
-panel revision. Selection, confirmation and discarding an incoming item use
+panel revision. Buff acquisition rows expose `recommended` from the same
+strategy match that controls `Img_Recommend` in the client. Selection, confirmation and discarding an incoming item use
 the original UI handlers. The host checks the panel revision and target before
 input and accepts at most one confirmation or discard per panel instance.
 
-Set `AURA_DEEP_DIVE_EVENT_TRACE=1` with a host built from this source to trace
-Deep Dive event stalls. The runtime log records `cube.move` and `cube.event`
-submission and callback stages, grid coordinates, and the event IDs and turn
-state seen by the client. The trace excludes raw request and response bodies.
-It is disabled by default and the runner detaches it when the bridge closes.
+The `deep_dive_interval` capability adds the plane interval, its four service
+pages and their confirmation overlays. The bridge reports live dust balance,
+eligibility, prices, recommendation flags and roster IDs. Each purchase uses
+the game's own UI handlers. A change in the balance or candidate list changes
+the revision. The runner checks the resulting balance and candidate state
+before authorizing another purchase. Formation reads and commands carry the
+same optional fixed roster and reserve-filling policy.
+
+The `deep_dive_battle_retry` capability exposes the Deep Dive defeat page's
+retry button and the confirmation prompt opened by that button. Both controls
+are bound to the battle level and the current result. After confirmation the
+bridge waits for a different result from the same battle after leaving the
+settlement view.
+
+The `deep_dive_shop` capability reads shop rows, recommendation flags and
+purchase feedback. The runner confirms each purchase from the changed shop
+state before selecting another item.
+
+Deep Dive event polling records the stages of `cube.move` and `cube.event` by
+default. The runtime log includes request coordinates, response codes, success
+callbacks, event IDs, and changes to the turn, animation, reward and option
+panel state. Raw request and response bodies stay out of the log. Set
+`AURA_DEEP_DIVE_EVENT_TRACE=0` to disable it. The runner detaches the trace when
+the bridge closes.
 
 ## Build
 

@@ -1,10 +1,10 @@
 """Independent vortex flow fork. New vortex behavior must not change healing."""
 from ._deep_dive_choice_target import (
     can_retry, choice_signature, choice_target, matching_card, new_card_panel,
-    option_set, ordered_cards, pending_target, result_progress, same_choice, target_fields,
+    option_set, ordered_cards, pending_target, preferred_card, result_progress, same_choice, target_fields,
 )
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT, RESULT
-from ._deep_dive_option_priority import choose_event_option
+from ._deep_dive_option_priority import choose_available_event_option
 
 
 def reset_observation(state):
@@ -13,6 +13,8 @@ def reset_observation(state):
 
 
 def start(state, observation, now):
+    state.pop('event_option_group', None)
+    state.pop('option_decision', None)
     for key in list(state):
         if key.startswith('vortex_'):state.pop(key,None)
     state.update(vortex_started=now,vortex_progress_at=now,vortex_seen=False,
@@ -43,7 +45,7 @@ def _supported(option):
             option.get('supported', False) and (not option.get('native_only') or bool(option.get('native'))))
 
 
-def step(state,o,now):
+def step(state,o,now,*,event_option_policy=None):
     if o['scene'] == ITEM_REPLACEMENT and not (o.get('native') or o.get('click')):
         reset_observation(state)
         if now - state['vortex_progress_at'] >= 30:
@@ -76,6 +78,7 @@ def step(state,o,now):
     board=scene in ('board','choose_move','choose_rotate') and o.get('event_board')
     known=option_page or selection or result or scene=='event_ending'
     if known:state['vortex_seen']=True
+    confirmed_card = None
     if pending:
         kind=pending['kind'];accepted=False;retry=False
         if kind=='entry':
@@ -92,7 +95,7 @@ def step(state,o,now):
             target=rows[i] if i<len(rows) else None
             same=target is not None and target['group']==pending['group'] and same_choice(target,pending)
             if kind=='option_select':
-                accepted=option_page and same and target['state']=='selected'
+                accepted=option_page and same and target['state'] in {'selected', 'disabled'}
                 retry=option_page and same and target['state']=='normal'
             elif not pending.get('battle_level'):
                 accepted=selection or result or scene=='event_ending' or board or next_options
@@ -126,6 +129,8 @@ def step(state,o,now):
             accepted=board or selection or result or option_page
             retry=scene=='event_ending'
         if accepted:
+            if kind == 'card_select':
+                confirmed_card = target
             state.pop('vortex_pending',None);state['vortex_progress_at']=now
             state['vortex_trace'].append({'confirmed':kind,'scene':scene,'at':now})
         else:
@@ -149,13 +154,9 @@ def step(state,o,now):
             state['vortex_submitted'] = False
             state['vortex_progress_at'] = now
             state['vortex_trace'].append({'followup_event_id': expected_event, 'at': now})
-        allowed = [(i, row) for i, row in enumerate(rows) if not row['blocked'] and row['state'] != 'disabled']
-        if not allowed:return _fail(state,'没有允许且可选的事件选项')
-        supported = [item for item in allowed if _supported(item[1])]
-        i, target = choose_event_option(supported or allowed)
-        if not _supported(target):
-            reasons = target.get('unsupported_reasons') or ['该选项需要桥接读取']
-            return _fail(state, '未支持的漩涡选项：'+target.get('title','')+'；'+', '.join(reasons))
+        choice = choose_available_event_option(state, o, event_option_policy, is_supported=_supported)
+        if choice is None:return _fail(state,'没有允许且可选的漩涡选项')
+        i, target = choice
         selected=target['state']=='selected'
         return _issue(state,'option_submit' if selected else 'option_select',
                       choice_target(target,'confirm' if selected else 'select',target.get('point')),
@@ -164,8 +165,8 @@ def step(state,o,now):
     if selection:
         cards=ordered_cards(o['cards'])
         if len(cards) not in (1,2,3):return _fail(state,'不支持的候选卡数量')
-        target=cards[0 if len(cards)<3 else 1]
-        if any(r['selected'] and r is not target for r in cards):
+        target=confirmed_card or preferred_card(cards)
+        if not target.get('recommended') and any(r['selected'] and r is not target for r in cards):
             return _fail(state,'非目标卡片已选中，停止以避免提交错误道具')
         selected=target['selected']
         point=o.get('click') if selected else target.get('point')

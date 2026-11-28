@@ -1,10 +1,10 @@
 """One bounded event transition per poll. The task's existing loop owns execution."""
 from ._deep_dive_choice_target import (
     can_retry, choice_signature, choice_target, matching_card, new_card_panel,
-    option_set, ordered_cards, pending_target, result_progress, same_choice, target_fields,
+    option_set, ordered_cards, pending_target, preferred_card, result_progress, same_choice, target_fields,
 )
 from ._deep_dive_node_rewards import ITEM_REPLACEMENT, RESULT
-from ._deep_dive_option_priority import choose_event_option
+from ._deep_dive_option_priority import choose_available_event_option
 
 
 def reset_observation(state):
@@ -13,6 +13,7 @@ def reset_observation(state):
 
 
 def start(state, observation, now):
+    state.pop('option_decision', None)
     for key in list(state):
         if key.startswith('event_'):state.pop(key,None)
     state.update(event_started=now,event_progress_at=now,event_seen=False,
@@ -34,7 +35,7 @@ def _fail(state,reason):
     return 'event_blocked',None
 
 
-def step(state,o,now):
+def step(state,o,now,*,event_option_policy=None):
     if o['scene'] == ITEM_REPLACEMENT and not (o.get('native') or o.get('click')):
         reset_observation(state)
         if now - state['event_progress_at'] >= 30:
@@ -51,6 +52,7 @@ def step(state,o,now):
     board=scene in ('board','choose_move','choose_rotate') and o.get('event_board')
     known=option_page or selection or result or scene=='event_ending'
     if known:state['event_seen']=True
+    confirmed_card = None
     if pending:
         kind=pending['kind'];accepted=False;retry=False
         if kind=='entry':
@@ -66,7 +68,7 @@ def step(state,o,now):
             target=rows[i] if i<len(rows) else None
             same=target is not None and target['group']==pending['group'] and same_choice(target,pending)
             if kind=='option_select':
-                accepted=option_page and same and target['state']=='selected'
+                accepted=option_page and same and target['state'] in {'selected', 'disabled'}
                 retry=option_page and same and target['state']=='normal'
             else:
                 accepted=selection or result or scene=='event_ending' or board
@@ -95,6 +97,8 @@ def step(state,o,now):
             accepted=board or selection or result or option_page
             retry=scene=='event_ending'
         if accepted:
+            if kind == 'card_select':
+                confirmed_card = target
             state.pop('event_pending',None);state['event_progress_at']=now
             state['event_trace'].append({'confirmed':kind,'scene':scene,'at':now})
         else:
@@ -109,9 +113,9 @@ def step(state,o,now):
         return 'event_returned',None
     if option_page:
         rows=o['event_options']
-        allowed=[(i,r) for i,r in enumerate(rows) if not r['blocked'] and r['state']!='disabled']
-        if not allowed:return _fail(state,'没有允许且可选的事件选项')
-        i,target=choose_event_option(allowed)
+        choice = choose_available_event_option(state, o, event_option_policy)
+        if choice is None:return _fail(state,'没有允许且可选的事件选项')
+        i,target=choice
         selected=target['state']=='selected'
         extra={'option_set':option_set(rows)} if 'native' in target else {}
         return _issue(state,'option_submit' if selected else 'option_select',
@@ -120,8 +124,8 @@ def step(state,o,now):
     if selection:
         cards=ordered_cards(o['cards'])
         if len(cards) not in (1,2,3):return _fail(state,'不支持的候选卡数量')
-        target=cards[0 if len(cards)<3 else 1]
-        if any(r['selected'] and r is not target for r in cards):
+        target=confirmed_card or preferred_card(cards)
+        if not target.get('recommended') and any(r['selected'] and r is not target for r in cards):
             return _fail(state,'非目标卡片已选中，停止以避免提交错误道具')
         selected=target['selected']
         point=o.get('click') if selected else target.get('point')
