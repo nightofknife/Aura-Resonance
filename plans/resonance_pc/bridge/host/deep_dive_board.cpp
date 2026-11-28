@@ -501,7 +501,7 @@ Json read_event_trace(LuaState *state, const std::string &mode) {
   if (trace["status"] != "active")
     return trace;
 
-  for (auto key : {"round", "moves", "rotations", "option_event_id", "option_state", "pending_rewards"})
+  for (auto key : {"map_id", "round", "moves", "rotations", "option_event_id", "option_state", "pending_rewards"})
     if (auto value = lua.number(result, key))
       trace[key] = *value;
   for (auto key : {"need_start_round", "need_trigger_round_end", "role_moving", "awaiting_reward_trigger",
@@ -534,9 +534,11 @@ Json read_event_trace(LuaState *state, const std::string &mode) {
       const int row = lua.at(records, i);
       if (lua.type(row) == lua_table) {
         Json record = Json::object();
-        for (auto key : {"sequence", "request", "event_id"})
+        for (auto key : {"sequence", "request", "event_id", "level_id"})
           if (auto value = lua.number(row, key))
             record[key] = *value;
+        if (auto type_id = lua.number(row, "type_id"))
+          record["node_type"] = node_kind(*type_id);
         for (auto key : {"stage", "protocol", "coord", "response_code"})
           if (auto value = lua.text(row, key); !value.empty())
             record[key] = std::move(value);
