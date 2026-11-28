@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from contextlib import contextmanager
+import hashlib
 import math
 import os
 import subprocess
@@ -26,7 +27,7 @@ from ....aura_base.src.platform.runtime_config import resolve_runtime_config
 from ....aura_base.src.platform.windows.window_selector import resolve_window_candidate
 from ..bridge.client import BridgeClient
 from ..bridge.frame_stream import BridgeFrameStream
-from ..bridge.native_bundle import ASSETS, stage_bootstrap, stage_host
+from ..bridge.native_bundle import ASSETS, HOST_DLL, stage_bootstrap, stage_host
 
 _CANCEL_TOKEN = contextvars.ContextVar("resonance_bridge_cancel_token", default=None)
 
@@ -205,6 +206,36 @@ class ResonancePcInputBridgeService:
         if not candidate.pid:
             raise TargetRuntimeError("input_viewport_invalid", "Bridge needs a live game process")
         return candidate.pid, candidate.hwnd
+
+    def loaded_version(self, pid: int) -> dict:
+        """Read the existing host identity without acquiring a bridge session."""
+        if not pid:
+            return {"state": "no_target"}
+        try:
+            status = BridgeClient(pid).request("status", timeout=0.5).get("result") or {}
+        except TargetRuntimeError as exc:
+            state = "unavailable" if exc.code == "input_bridge_unavailable" else "unknown"
+            return {"state": state}
+        if not isinstance(status, dict):
+            return {"state": "unknown"}
+        host_state = status.get("host_state")
+        if host_state == "unloaded":
+            return {"state": "unloaded"}
+        if host_state in {"loading", "draining", "unloading"}:
+            return {"state": "transition"}
+        digest = str(status.get("host_hash") or "").upper()
+        if host_state in {"loaded", "unload_failed"} and len(digest) == 64 and all(
+                char in "0123456789ABCDEF" for char in digest):
+            bundled_hash = None
+            try:
+                with (self._assets / HOST_DLL).open("rb") as host:
+                    bundled_hash = hashlib.file_digest(host, "sha256").hexdigest().upper()
+            except OSError:
+                pass
+            return {"state": "loaded", "host_hash": digest, "bundled_hash": bundled_hash}
+        if not host_state and "bootstrap_abi" not in status and status.get("state") == "ready":
+            return {"state": "legacy"}
+        return {"state": "unknown"}
 
     def _ready(self):
         root_cid = current_root_cid()
